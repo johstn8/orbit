@@ -270,12 +270,12 @@ final class ChatGPTProvider: Provider {
         sink.run.cancelHandler = { task.cancel() }
     }
 
-    private func toolsPayload() -> [JSONObject] {
-        let fns: [JSONObject] = (hub?.toolCatalog() ?? []).map { t in
+    private func toolsPayload(_ conversationId: String) -> [JSONObject] {
+        let fns: [JSONObject] = (hub?.toolCatalog(conversationId: conversationId) ?? []).map { t in
             ["type": "function", "name": t["name"] ?? "", "description": t["description"] ?? "", "parameters": t["input_schema"] ?? ["type": "object"], "strict": false]
         }
         if useNamespace {
-            return [["type": "namespace", "name": Self.namespace, "description": "Read and operate the user's Safari browser tabs.", "tools": fns]]
+            return [["type": "namespace", "name": Self.namespace, "description": "Read and operate the user's Safari browser tabs (and, when allowed, local files).", "tools": fns]]
         }
         return fns
     }
@@ -360,7 +360,7 @@ final class ChatGPTProvider: Provider {
             "model": model,
             "instructions": Prompts.system,
             "input": items,
-            "tools": toolsPayload(),
+            "tools": toolsPayload(sink.run.conversationId),
             "tool_choice": "auto",
             "parallel_tool_calls": false,
             "store": false,
@@ -438,6 +438,4 @@ final class ChatGPTProvider: Provider {
     }
 }
 
-extension Hub {
-    func toolCatalog() -> [JSONObject] { queue.sync { currentTools } }
-}
+

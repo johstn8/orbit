@@ -1,7 +1,7 @@
 [
  {
   "name": "tabs_list",
-  "description": "List open Safari tabs (id, title, URL, which one is active, and which one is the agent's current tab). Use before switching tabs or comparing tabs.",
+  "description": "List open Safari tabs (id, title, URL, which one is active, and which one is the agent's current tab), grouped by Safari profile when the user allowed access to all profiles. Use before switching tabs or comparing tabs.",
   "input_schema": {
    "type": "object",
    "properties": {},
@@ -34,6 +34,10 @@
     "max_chars": {
      "type": "integer",
      "description": "Maximum characters (default 40000)."
+    },
+    "profile": {
+     "type": "string",
+     "description": "Safari profile name for a tab in another profile (from tabs_list). Omit for the chat's own profile."
     }
    },
    "additionalProperties": false
@@ -60,6 +64,10 @@
     "max_chars": {
      "type": "integer",
      "description": "Maximum characters (default 30000)."
+    },
+    "profile": {
+     "type": "string",
+     "description": "Safari profile name for a tab in another profile (from tabs_list). Omit for the chat's own profile."
     }
    },
    "additionalProperties": false
@@ -77,6 +85,10 @@
     },
     "query": {
      "type": "string"
+    },
+    "profile": {
+     "type": "string",
+     "description": "Safari profile name for a tab in another profile (from tabs_list). Omit for the chat's own profile."
     }
    },
    "required": [
@@ -94,6 +106,10 @@
     "tabId": {
      "type": "integer",
      "description": "Optional tab id from tabs_list. Defaults to the agent's current tab (the tab the user was viewing when they sent the request, or the last tab you switched to/opened)."
+    },
+    "profile": {
+     "type": "string",
+     "description": "Safari profile name for a tab in another profile (from tabs_list). Omit for the chat's own profile."
     }
    },
    "additionalProperties": false
@@ -120,6 +136,10 @@
     "y": {
      "type": "number",
      "description": "Viewport Y coordinate (only if no ref is available)."
+    },
+    "profile": {
+     "type": "string",
+     "description": "Safari profile name for a tab in another profile (from tabs_list). Omit for the chat's own profile."
     }
    },
    "additionalProperties": false
@@ -149,6 +169,10 @@
     "submit": {
      "type": "boolean",
      "description": "Press Enter after typing (default false)."
+    },
+    "profile": {
+     "type": "string",
+     "description": "Safari profile name for a tab in another profile (from tabs_list). Omit for the chat's own profile."
     }
    },
    "required": [
@@ -179,6 +203,10 @@
       "boolean"
      ],
      "description": "Option value/text, true/false for checkboxes, or the text value."
+    },
+    "profile": {
+     "type": "string",
+     "description": "Safari profile name for a tab in another profile (from tabs_list). Omit for the chat's own profile."
     }
    },
    "required": [
@@ -204,6 +232,10 @@
     "ref": {
      "type": "string",
      "description": "Element reference from read_page or find, e.g. \"k3f_12\"."
+    },
+    "profile": {
+     "type": "string",
+     "description": "Safari profile name for a tab in another profile (from tabs_list). Omit for the chat's own profile."
     }
    },
    "required": [
@@ -240,6 +272,10 @@
     "ref": {
      "type": "string",
      "description": "Element reference from read_page or find, e.g. \"k3f_12\"."
+    },
+    "profile": {
+     "type": "string",
+     "description": "Safari profile name for a tab in another profile (from tabs_list). Omit for the chat's own profile."
     }
    },
    "additionalProperties": false
@@ -257,6 +293,10 @@
     },
     "url": {
      "type": "string"
+    },
+    "profile": {
+     "type": "string",
+     "description": "Safari profile name for a tab in another profile (from tabs_list). Omit for the chat's own profile."
     }
    },
    "required": [
@@ -273,6 +313,10 @@
    "properties": {
     "tabId": {
      "type": "integer"
+    },
+    "profile": {
+     "type": "string",
+     "description": "Safari profile name for a tab in another profile (from tabs_list). Omit for the chat's own profile."
     }
    },
    "required": [
@@ -289,6 +333,10 @@
    "properties": {
     "url": {
      "type": "string"
+    },
+    "profile": {
+     "type": "string",
+     "description": "Safari profile name for a tab in another profile (from tabs_list). Omit for the chat's own profile."
     }
    },
    "required": [
@@ -305,6 +353,10 @@
    "properties": {
     "tabId": {
      "type": "integer"
+    },
+    "profile": {
+     "type": "string",
+     "description": "Safari profile name for a tab in another profile (from tabs_list). Omit for the chat's own profile."
     }
    },
    "required": [
@@ -322,6 +374,10 @@
     "tabId": {
      "type": "integer",
      "description": "Optional tab id from tabs_list. Defaults to the agent's current tab (the tab the user was viewing when they sent the request, or the last tab you switched to/opened)."
+    },
+    "profile": {
+     "type": "string",
+     "description": "Safari profile name for a tab in another profile (from tabs_list). Omit for the chat's own profile."
     }
    },
    "additionalProperties": false
@@ -339,6 +395,10 @@
     "tabId": {
      "type": "integer",
      "description": "Optional tab id from tabs_list. Defaults to the agent's current tab (the tab the user was viewing when they sent the request, or the last tab you switched to/opened)."
+    },
+    "profile": {
+     "type": "string",
+     "description": "Safari profile name for a tab in another profile (from tabs_list). Omit for the chat's own profile."
     }
    },
    "required": [

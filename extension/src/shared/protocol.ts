@@ -94,8 +94,38 @@ export interface ApprovalRequest {
 }
 
 export type ApprovalMode = "sensitive" | "always" | "never";
-/** Which tabs the agent may use: only the chat's tab (+ tabs it opens), or all tabs in that window. */
-export type TabScope = "tab" | "window";
+/** Which tabs the agent may use: the chat's tab (+ tabs it opens), all tabs in that window, or all windows and profiles. */
+export type TabScope = "tab" | "window" | "all";
+/** Local computer access, enforced by the native app: none, chosen folders, or broader access. */
+export type ComputerAccess = "none" | "folders" | "full";
+
+export interface AgentAccess {
+  computerAccess: ComputerAccess;
+  folders: string[];
+  allowCommands: boolean;
+}
+
+export interface ProfileInfo {
+  id: string;
+  name: string;
+  symbol?: string;
+  color?: string;
+}
+
+/** Configuration the native app pushes to each extension instance (no secrets). */
+export interface InstanceConfig {
+  profileId: string;
+  profiles: ProfileInfo[];
+  routing: {
+    active: boolean;
+    pausedUntil: number;
+    typedNavigation: "keep" | "off";
+    closeRedundantTabs: boolean;
+    rules: { id: string; pattern: string; profileId: string }[];
+  };
+  sharing: { id: string; domain: string; extraDomains: string[]; sourceProfileId: string; targets: string[]; excludedCookies: string[] }[];
+  computerAccess: ComputerAccess;
+}
 
 export interface Settings {
   approvalMode: ApprovalMode;
@@ -128,6 +158,15 @@ export interface PanelState {
   settings: Settings;
   context: PageContext | null;
   sidePanelMode: "native" | "page" | "window";
+  /** This Safari profile, as named in the Orbit app. */
+  profile?: ProfileInfo;
+  agent: AgentAccess;
+}
+
+/** Per-tab panel state (draft text and focus survive page navigations). */
+export interface TabPanelState {
+  draft: string;
+  restoreFocus: boolean;
 }
 
 export type PanelToBackground =
@@ -144,6 +183,11 @@ export type PanelToBackground =
   | { type: "claude_login" }
   | { type: "refresh_providers" }
   | { type: "reconnect" }
-  | { type: "close_panel" };
+  | { type: "close_panel" }
+  | { type: "set_computer_access"; access?: ComputerAccess; allowCommands?: boolean; removeFolder?: string }
+  | { type: "choose_folders" }
+  | { type: "open_app_settings"; section?: string }
+  | { type: "draft"; text: string }
+  | { type: "focus_state"; focused: boolean };
 
-export type BackgroundToPanel = { type: "state"; state: PanelState };
+export type BackgroundToPanel = { type: "state"; state: PanelState; tab?: TabPanelState };

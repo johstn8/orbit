@@ -19,16 +19,29 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         let item = context.inputItems.first as? NSExtensionItem
         let message = item?.userInfo?[SFExtensionMessageKey] as? [String: Any]
         let type = message?["type"] as? String ?? ""
+        // Safari runs one extension instance per profile and tells us which one is asking.
+        let profile = Self.profileId(item?.userInfo?[SFExtensionProfileKey])
         DispatchQueue.global().async {
             var reply: [String: Any]
             switch type {
-            case "connection_info": reply = Self.connectionInfo()
+            case "connection_info":
+                reply = Self.connectionInfo()
+                reply["profile"] = profile
+                reply["profileKeyPresent"] = item?.userInfo?[SFExtensionProfileKey] != nil
             default: reply = ["error": "unknown request"]
             }
             let response = NSExtensionItem()
             response.userInfo = [SFExtensionMessageKey: reply]
             context.completeRequest(returningItems: [response], completionHandler: nil)
         }
+    }
+
+    /// The Safari profile identifier (a UUID) of the extension instance that sent the request.
+    static func profileId(_ raw: Any?) -> String {
+        if let u = raw as? UUID { return u.uuidString }
+        if let u = raw as? NSUUID { return u.uuidString }
+        if let s = raw as? String, !s.isEmpty { return s }
+        return "default"
     }
 
     private static func readInfo() -> [String: Any]? {

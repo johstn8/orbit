@@ -1,10 +1,13 @@
-// Content script: runs in every top-level page (isolated world). It hosts the
-// page-attached assistant panel and executes DOM tools on request from the
-// background script. It never runs page-supplied code.
+// Content script: runs in every top-level page (isolated world, from
+// document_start). It hosts the page-attached Orbit panel, makes room for it,
+// intercepts link clicks that routing rules send to another Safari profile, and
+// executes DOM tools on request from the background script. It never runs
+// page-supplied code.
 import {
   ToolError, buildTree, findElements, pageText, getSelectionText, resolveRef, describeElement, clickElement, clickAt,
   typeInto, setFormValue, pressKey, keySubmitsForm, scrollPage, PANEL_HOST_TAG, INDICATOR_ID, refFor, controlFor,
 } from "./dom-tools";
+import { routeTarget } from "../shared/routing";
 
 declare const browser: any;
 
@@ -15,155 +18,243 @@ try { w.__safariAgentDispose?.(); } catch { /* ignore */ }
 main();
 
 function main() {
+  const NOTICE_ID = "orbit-route-notice";
+  const stats: any = { frameLoadMs: 0, readyMs: 0, staleFrames: 0, panelCreates: 0, panelHides: 0, slices: 0, maxSliceMs: 0, adjusted: 0, reattached: 0, focusRestores: 0 };
+  w.__orbitStats = stats;
+
+  // ---------------- routing config (rules are not secret) ----------------
+  let cfg: any = null;
+  browser.storage.local.get("orbitConfig").then((s: any) => { cfg = s?.orbitConfig || null; }).catch(() => {});
+  const onStorage = (changes: any, area: string) => {
+    if (area === "local" && changes.orbitConfig) cfg = changes.orbitConfig.newValue || null;
+  };
+  try { browser.storage.onChanged.addListener(onStorage); } catch { /* orphaned */ }
+
+  // ---------------- panel ----------------
   let panelHost: HTMLElement | null = null;
   let panelFrame: HTMLIFrameElement | null = null;
   let panelWidth = 420;
+  let wanted = false;          // the sidebar should be open in this tab
+  let animate = true;          // margin transition (off while dragging)
   let pushStyle: HTMLStyleElement | null = null;
 
   const GAP = 10; // floating inset card with continuous corners
-  const applyPush = (on: boolean) => {
-    if (on) {
-      if (!pushStyle) {
-        pushStyle = document.createElement("style");
-        pushStyle.setAttribute("data-safari-agent", "");
-        (document.head || document.documentElement).appendChild(pushStyle);
-      }
-      pushStyle.textContent = `html{margin-right:${panelWidth + GAP * 2}px !important;transition:margin-right .25s cubic-bezier(.2,.8,.2,1);}`;
-    } else if (pushStyle) {
-      pushStyle.remove();
+  const reserve = () => panelWidth + GAP * 2;
+
+  // Page flow is pushed with html{margin-right}. Layers adjusted below refer to
+  // --orbit-reserve, so resizing only rewrites this one style element.
+  const writePush = () => {
+    if (!wanted) {
+      pushStyle?.remove();
       pushStyle = null;
+      return;
     }
+    if (!pushStyle || !pushStyle.isConnected) {
+      pushStyle = document.createElement("style");
+      pushStyle.setAttribute("data-safari-agent", "");
+      (document.head || document.documentElement).appendChild(pushStyle);
+    }
+    pushStyle.textContent = `:root{--orbit-reserve:${reserve()}px}html{margin-right:var(--orbit-reserve) !important;${animate ? "transition:margin-right .25s cubic-bezier(.2,.8,.2,1);" : ""}}`;
   };
 
-  // ---- make room for the sidebar ----
-  // Normal page flow is pushed left with html{margin-right}. Fixed layers (app
-  // shells like chatgpt.com, headers, chat widgets) ignore that margin, so the
-  // ones that reach under the sidebar are narrowed or shifted left, and restored
-  // when the sidebar closes.
+  // ---------------- make room for fixed layers ----------------
+  // Fixed layers (app shells like chatgpt.com, headers, chat widgets) and
+  // elements sized to 100vw ignore the html margin. The ones reaching under the
+  // sidebar are narrowed or shifted, and restored exactly when it closes.
+  // Scanning is incremental (only added/changed elements) and time-sliced, so
+  // busy pages never get long main-thread pauses from it.
   type Saved = Record<string, [string, string]>;
   const adjusted = new Map<HTMLElement, Saved>();
-  const reserve = () => panelWidth + GAP * 2;
   const setImp = (el: HTMLElement, prop: string, val: string, saved: Saved) => {
     if (!(prop in saved)) saved[prop] = [el.style.getPropertyValue(prop), el.style.getPropertyPriority(prop)];
     el.style.setProperty(prop, val, "important");
   };
-  const restoreFixed = () => {
-    for (const [el, saved] of adjusted) {
-      for (const [p, [v, pr]] of Object.entries(saved)) {
-        if (v) el.style.setProperty(p, v, pr);
-        else el.style.removeProperty(p);
-      }
+  const restoreOne = (el: HTMLElement, saved: Saved) => {
+    for (const [p, [v, pr]] of Object.entries(saved)) {
+      if (v) el.style.setProperty(p, v, pr);
+      else el.style.removeProperty(p);
     }
-    adjusted.clear();
   };
-  const adjustFixed = () => {
-    if (!panelHost) return;
+  const restoreFixed = () => {
+    for (const [el, saved] of adjusted) restoreOne(el, saved);
+    adjusted.clear();
+    stats.adjusted = 0;
+  };
+  const ours = (el: Element) => el === panelHost || el.id === INDICATOR_ID || el.id === NOTICE_ID || el.tagName === "STYLE" || el.tagName === "SCRIPT";
+
+  let queue: Element[] = [];               // subtrees to walk (added nodes)
+  const touched = new Set<Element>();     // single elements whose class/style changed
+  let walker: TreeWalker | null = null;
+  let sliceTimer: any = null;
+  const schedule = () => { if (!sliceTimer) sliceTimer = setTimeout(runSlice, 60); };
+  const enqueue = (el: Element) => { queue.push(el); schedule(); };
+  const touch = (el: Element) => { touched.add(el); schedule(); };
+  const fullScan = () => {
+    queue = [document.body || document.documentElement];
+    walker = null;
+    clearTimeout(sliceTimer);
+    sliceTimer = setTimeout(runSlice, 0);
+  };
+  const runSlice = () => {
+    sliceTimer = null;
+    if (!wanted || !panelHost) { queue = []; touched.clear(); walker = null; return; }
+    const t0 = performance.now();
     const vw = window.innerWidth;
-    const r = reserve();
-    // Drop entries the page has re-rendered or removed.
-    for (const [el, saved] of adjusted) {
-      const intact = el.isConnected && Object.keys(saved).every((p) => el.style.getPropertyPriority(p) === "important");
-      if (!intact) adjusted.delete(el);
-    }
-    const root = document.body || document.documentElement;
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
-    let n = 0;
-    for (let node = walker.nextNode(); node && n < 6000; node = walker.nextNode(), n++) {
-      const el = node as HTMLElement;
-      if (el === panelHost || el.id === INDICATOR_ID || adjusted.has(el)) continue;
+    const edge = vw - reserve();
+    const writes: (() => void)[] = [];
+    const consider = (el: HTMLElement) => {
+      if (ours(el) || adjusted.has(el)) return;
       const cs = getComputedStyle(el);
-      if (cs.display === "none") continue;
-      if (cs.position !== "fixed") {
-        // Elements sized to the full viewport width (e.g. Tailwind w-screen app shells
-        // like chatgpt.com) ignore the html margin: cap them to the free width.
-        const rr = el.getBoundingClientRect();
-        if (Math.abs(rr.width - vw) <= 4 && rr.right > vw - r + 2) {
+      if (cs.display === "none") return;
+      if (cs.position === "fixed") {
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0 || rect.right <= edge + 1) return;
+        const saved: Saved = {};
+        if (rect.width >= vw * 0.4) {
+          const left = Math.max(0, rect.left);
+          writes.push(() => {
+            setImp(el, "left", `${left}px`, saved);
+            setImp(el, "right", "var(--orbit-reserve)", saved);
+            setImp(el, "width", "auto", saved);
+            setImp(el, "max-width", "calc(100vw - var(--orbit-reserve))", saved);
+          });
+        } else {
+          writes.push(() => setImp(el, "translate", "calc(-1 * var(--orbit-reserve)) 0", saved));
+        }
+        adjusted.set(el, saved);
+      } else if (cs.position !== "absolute") {
+        const rect = el.getBoundingClientRect();
+        if (Math.abs(rect.width - vw) <= 4 && rect.right > edge + 2) {
           const saved: Saved = {};
-          setImp(el, "max-width", `calc(100vw - ${r}px)`, saved);
+          writes.push(() => setImp(el, "max-width", "calc(100vw - var(--orbit-reserve))", saved));
           adjusted.set(el, saved);
         }
-        continue;
       }
-      const rect = el.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0 || rect.right <= vw - r + 1) continue;
-      const saved: Saved = {};
-      if (rect.width >= vw * 0.4) {
-        // Full-width layer: pin both edges so it ends where the sidebar begins.
-        setImp(el, "left", `${Math.max(0, rect.left)}px`, saved);
-        setImp(el, "right", `${r}px`, saved);
-        setImp(el, "width", "auto", saved);
-        setImp(el, "max-width", `calc(100vw - ${r}px)`, saved);
-      } else {
-        // Smaller element at the right edge (button, toast, chat widget): move it left.
-        setImp(el, "translate", `-${r}px 0`, saved);
-      }
-      adjusted.set(el, saved);
+    };
+    let n = 0;
+    for (const el of touched) {
+      touched.delete(el);
+      if (el.isConnected && el instanceof HTMLElement) consider(el);
+      if (++n % 64 === 0 && performance.now() - t0 >= 4) break;
     }
+    while (performance.now() - t0 < 6) {
+      if (!walker) {
+        const root = queue.pop();
+        if (!root) break;
+        if (!root.isConnected || (panelHost && panelHost.contains(root))) continue;
+        if (root instanceof HTMLElement) consider(root);
+        walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+      }
+      const node = walker.nextNode();
+      if (!node) { walker = null; continue; }
+      consider(node as HTMLElement);
+      if (++n % 64 === 0 && performance.now() - t0 >= 6) break;
+    }
+    for (const fn of writes) fn(); // writes after reads: no layout thrashing
+    stats.adjusted = adjusted.size;
+    stats.slices++;
+    stats.maxSliceMs = Math.max(stats.maxSliceMs, Math.round(performance.now() - t0));
+    if (walker || queue.length || touched.size) sliceTimer = setTimeout(runSlice, 16);
   };
-  let fixTimer: any = null;
-  let fixInterval: any = null;
-  let fixObserver: MutationObserver | null = null;
-  const scheduleFix = () => {
-    clearTimeout(fixTimer);
-    fixTimer = setTimeout(adjustFixed, 250);
+  let observer: MutationObserver | null = null;
+  let checkInterval: any = null;
+  const onResize = () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { restoreFixed(); fullScan(); }, 180);
   };
+  let resizeTimer: any = null;
   const startFixing = () => {
-    adjustFixed();
-    if (!fixObserver) {
-      fixObserver = new MutationObserver(scheduleFix);
-      fixObserver.observe(document.documentElement, { childList: true, subtree: true });
-      window.addEventListener("resize", onResizeFix);
-      fixInterval = setInterval(adjustFixed, 2000);
-    }
+    if (observer) return;
+    observer = new MutationObserver((records) => {
+      for (const r of records) {
+        if (r.type === "childList") {
+          r.addedNodes.forEach((nd) => { if (nd.nodeType === 1) enqueue(nd as Element); });
+        } else if (r.target.nodeType === 1 && !adjusted.has(r.target as HTMLElement)) {
+          // Only the element itself: walking subtrees on every class change would be expensive.
+          touch(r.target as Element);
+        }
+      }
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style"] });
+    window.addEventListener("resize", onResize);
+    // Cheap check of adjusted layers: re-adjust the ones the page re-rendered.
+    checkInterval = setInterval(() => {
+      for (const [el, saved] of adjusted) {
+        const intact = el.isConnected && Object.keys(saved).every((p) => el.style.getPropertyPriority(p) === "important");
+        if (!intact) { adjusted.delete(el); if (el.isConnected) enqueue(el); }
+      }
+    }, 2000);
+    fullScan();
   };
-  const onResizeFix = () => { restoreFixed(); scheduleFix(); };
   const stopFixing = () => {
-    fixObserver?.disconnect();
-    fixObserver = null;
-    clearInterval(fixInterval);
-    clearTimeout(fixTimer);
-    window.removeEventListener("resize", onResizeFix);
+    observer?.disconnect();
+    observer = null;
+    clearInterval(checkInterval);
+    clearTimeout(sliceTimer);
+    clearTimeout(resizeTimer);
+    sliceTimer = null;
+    queue = [];
+    touched.clear();
+    walker = null;
+    window.removeEventListener("resize", onResize);
     restoreFixed();
   };
 
-  const showPanel = (width?: number) => {
+  // Keep the host attached: some sites rebuild parts of the document.
+  let hostGuard: MutationObserver | null = null;
+  const guardHost = () => {
+    if (hostGuard) return;
+    hostGuard = new MutationObserver(() => {
+      if (wanted && panelHost && !panelHost.isConnected) {
+        document.documentElement.appendChild(panelHost);
+        stats.reattached++;
+      }
+      if (wanted && pushStyle && !pushStyle.isConnected) writePush();
+    });
+    hostGuard.observe(document.documentElement, { childList: true });
+  };
+
+  let markReady = () => {};
+  const focusPanel = () => {
+    try { panelFrame?.focus(); } catch { /* ignore */ }
+    try { panelFrame?.contentWindow?.focus(); } catch { /* ignore */ }
+  };
+
+  const showPanel = (width?: number, focus = false) => {
     if (width) panelWidth = Math.max(320, Math.min(900, width));
-    if (panelHost && panelHost.isConnected) {
+    wanted = true;
+    if (panelHost) {
+      // Already there: never rebuild (that would reload the panel and lose focus).
       panelHost.style.width = panelWidth + "px";
-      panelHost.style.display = "block";
-      applyPush(true);
-      restoreFixed();
+      if (!panelHost.isConnected) document.documentElement.appendChild(panelHost);
+      writePush();
       startFixing();
+      if (focus) focusPanel();
       return;
     }
+    stats.panelCreates++;
     panelHost = document.createElement(PANEL_HOST_TAG);
-    panelHost.style.cssText = `all:initial;color-scheme:light dark;position:fixed;top:${GAP}px;right:${GAP}px;bottom:${GAP}px;width:${panelWidth}px;z-index:2147483646;display:block;`;
+    panelHost.style.cssText = `all:initial;color-scheme:light dark;position:fixed;top:${GAP}px;right:${GAP}px;bottom:${GAP}px;width:${panelWidth}px;z-index:2147483646;display:block;contain:layout style;`;
     const root = panelHost.attachShadow({ mode: "closed" });
     const style = document.createElement("style");
     style.textContent = `
       :host{all:initial;color-scheme:light dark}
-      .wrap{position:absolute;inset:0;display:flex;overflow:hidden;border-radius:28px;
+      /* The shadow lives on its own layer: the card itself clips its content to the
+         rounded shape (iframes ignore rounded overflow clipping in WebKit otherwise). */
+      .shadow{position:absolute;inset:0;border-radius:28px;pointer-events:none;
+        box-shadow:0 0 0 .5px rgba(0,0,0,.12),0 1px 3px rgba(0,0,0,.05),0 14px 44px rgba(0,0,0,.15);animation:in .32s cubic-bezier(.2,.8,.2,1)}
+      .wrap{position:absolute;inset:0;display:flex;overflow:hidden;border-radius:28px;clip-path:inset(0 round 28px);isolation:isolate;
         -webkit-backdrop-filter:blur(40px) saturate(180%);backdrop-filter:blur(40px) saturate(180%);
         background:rgba(244,244,244,.84);
-        box-shadow:0 0 0 .5px rgba(0,0,0,.13),0 1px 3px rgba(0,0,0,.06),0 14px 44px rgba(0,0,0,.16);
         animation:in .32s cubic-bezier(.2,.8,.2,1)}
-      @media (prefers-color-scheme: dark){.wrap{background:rgba(40,40,40,.86);box-shadow:0 0 0 .5px rgba(255,255,255,.12),0 14px 44px rgba(0,0,0,.5)}}
+      @media (prefers-color-scheme: dark){.wrap{background:rgba(40,40,40,.86)}.shadow{box-shadow:0 0 0 .5px rgba(255,255,255,.12),0 14px 44px rgba(0,0,0,.5)}}
       @keyframes in{from{opacity:0;transform:translateX(28px) scale(.985)}to{opacity:1;transform:none}}
-      .handle{position:absolute;left:0;top:28px;bottom:28px;width:7px;cursor:col-resize;z-index:2}
+      .handle{position:absolute;left:0;top:28px;bottom:28px;width:7px;cursor:col-resize;z-index:2;touch-action:none}
       .handle::after{content:"";position:absolute;left:2px;top:50%;width:3px;height:36px;margin-top:-18px;border-radius:3px;background:rgba(127,127,127,.0);transition:background .15s}
       .handle:hover::after,.handle.drag::after{background:rgba(127,127,127,.55)}
-      iframe{border:0;width:100%;height:100%;display:block;color-scheme:light dark;background:transparent}
+      iframe{border:0;width:100%;height:100%;display:block;color-scheme:light dark;background:transparent;border-radius:28px;opacity:0;transition:opacity .18s}
+      iframe.ready{opacity:1}
       .shield{position:fixed;inset:0;cursor:col-resize;display:none;z-index:3}
-      .notice{position:absolute;inset:0;display:none;align-items:center;justify-content:center;padding:24px;z-index:4;
-        font:13px/1.45 -apple-system,system-ui,sans-serif;color:#1d1d1f}
-      .notice.show{display:flex}
-      .n-card{background:#fff;border-radius:20px;padding:16px;box-shadow:0 0 0 .5px rgba(0,0,0,.1),0 8px 24px rgba(0,0,0,.12);max-width:300px}
-      .n-title{font-weight:600;margin-bottom:4px}.n-text{color:#6e6e73;font-size:12px}
-      .n-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
-      .n-buttons button{all:unset;text-align:center;border-radius:999px;padding:6px 0;font-weight:550;cursor:default;background:rgba(0,0,0,.06)}
-      .n-buttons .n-reload{background:#0a84ff;color:#fff}
-      @media (prefers-color-scheme: dark){.notice{color:#f5f5f7}.n-card{background:#333;box-shadow:0 0 0 .5px rgba(255,255,255,.1),0 8px 24px rgba(0,0,0,.4)}
-        .n-text{color:#a1a1a6}.n-buttons button{background:rgba(255,255,255,.1)}.n-buttons .n-reload{background:#0a84ff}}
     `;
     const wrap = document.createElement("div");
     wrap.className = "wrap";
@@ -172,68 +263,96 @@ function main() {
     handle.title = "Drag to resize";
     const shield = document.createElement("div");
     shield.className = "shield";
+    // The panel announces itself with this nonce once its UI booted. Tabs left over
+    // from an extension update (or sites that block embedded frames) never do: then
+    // the sidebar is removed again and a single reload card is shown instead.
+    const nonce = Math.random().toString(36).slice(2) + Date.now().toString(36);
     panelFrame = document.createElement("iframe");
-    panelFrame.src = browser.runtime.getURL("panel.html") + "?mode=page";
+    panelFrame.src = browser.runtime.getURL("panel.html") + "?mode=page" + (focus ? "&focus=1" : "") + "&n=" + nonce;
+    // (Never read panelFrame.src back: Safari masks extension URLs for content scripts.)
     panelFrame.setAttribute("allow", "clipboard-write");
     panelFrame.setAttribute("allowtransparency", "true");
-    panelFrame.title = "Safari Agent";
+    panelFrame.title = "Orbit";
     w.__safariAgentFrameLoaded = false;
-    panelFrame.addEventListener("load", () => { w.__safariAgentFrameLoaded = true; });
-    // Safety net: if the sidebar UI can't load in this page (tab left over from an
-    // extension update, or a site that blocks embedded frames), offer a reload.
-    const notice = document.createElement("div");
-    notice.className = "notice";
-    notice.innerHTML = `<div class="n-card"><div class="n-title">Reload to use Safari Agent here</div>
-      <div class="n-text">Safari Agent was updated or this page blocked the sidebar. Reload the page to open it.</div>
-      <div class="n-buttons"><button class="n-close">Close</button><button class="n-reload">Reload Page</button></div></div>`;
-    notice.querySelector(".n-reload")!.addEventListener("click", () => location.reload());
-    notice.querySelector(".n-close")!.addEventListener("click", () => hidePanel());
-    wrap.append(handle, panelFrame, notice);
-    root.append(style, wrap, shield);
     const frame = panelFrame;
+    // Two independent signals: a postMessage from the panel (identity checks on window
+    // proxies are unreliable across worlds, so only the secret nonce is checked), and the
+    // background confirming that this tab's panel connected its port.
+    const createdAt = performance.now();
+    frame.addEventListener("load", () => { stats.frameLoadMs = Math.round(performance.now() - createdAt); });
+    markReady = () => {
+      if (panelFrame !== frame) return;
+      if (!stats.readyMs) stats.readyMs = Math.round(performance.now() - createdAt);
+      w.__safariAgentFrameLoaded = true;
+      frame.classList.add("ready");
+      window.removeEventListener("message", onReady);
+    };
+    const onReady = (e: MessageEvent) => { if (e.data?.orbitPanelReady === nonce) markReady(); };
+    window.addEventListener("message", onReady);
+    const shadowLayer = document.createElement("div");
+    shadowLayer.className = "shadow";
+    wrap.append(handle, panelFrame);
+    root.append(style, shadowLayer, wrap, shield);
     setTimeout(() => {
-      if (panelFrame === frame && !w.__safariAgentFrameLoaded) notice.classList.add("show");
-    }, 3500);
-    let startX = 0;
-    let startW = 0;
+      if (panelFrame !== frame || w.__safariAgentFrameLoaded) return;
+      window.removeEventListener("message", onReady);
+      stats.staleFrames++;
+      hidePanel();
+      showReloadCard();
+    }, 5000);
+
+    // ---- resizing: the card follows the pointer every frame; the page catches up ~10×/s ----
+    let startX = 0, startW = 0, pendingW = 0, raf = 0, lastPush = 0;
+    const applyDrag = () => {
+      raf = 0;
+      panelWidth = pendingW;
+      panelHost!.style.width = panelWidth + "px";
+      const now = performance.now();
+      if (now - lastPush > 100) { lastPush = now; writePush(); }
+    };
     handle.addEventListener("pointerdown", (e: PointerEvent) => {
       startX = e.clientX;
       startW = panelWidth;
+      animate = false;
       handle.classList.add("drag");
       shield.style.display = "block";
       e.preventDefault();
     });
     shield.addEventListener("pointermove", (e: PointerEvent) => {
-      panelWidth = Math.max(320, Math.min(900, startW + (startX - e.clientX)));
-      panelHost!.style.width = panelWidth + "px";
-      applyPush(true);
+      pendingW = Math.max(320, Math.min(900, startW + (startX - e.clientX)));
+      if (!raf) raf = requestAnimationFrame(applyDrag);
     });
     const end = () => {
       if (shield.style.display !== "block") return;
       shield.style.display = "none";
       handle.classList.remove("drag");
+      if (raf) { cancelAnimationFrame(raf); applyDrag(); }
+      writePush();
+      animate = true;
       browser.runtime.sendMessage({ kind: "panel_width", width: panelWidth }).catch(() => {});
-      restoreFixed();
-      adjustFixed();
+      fullScan(); // layers between the old and the new edge
     };
     shield.addEventListener("pointerup", end);
     shield.addEventListener("pointerleave", end);
-    (document.body || document.documentElement).appendChild(panelHost);
-    applyPush(true);
+    document.documentElement.appendChild(panelHost);
+    guardHost();
+    writePush();
     startFixing();
   };
 
   const hidePanel = () => {
+    wanted = false;
     stopFixing();
     if (panelHost) {
+      stats.panelHides++;
       panelHost.remove();
       panelHost = null;
       panelFrame = null;
     }
-    applyPush(false);
+    writePush();
   };
 
-  // ---- agent activity indicator ----
+  // ---------------- agent activity indicator ----------------
   let indicator: HTMLElement | null = null;
   const setIndicator = (active: boolean) => {
     if (!active) {
@@ -260,7 +379,101 @@ function main() {
     document.documentElement.appendChild(indicator);
   };
 
-  // ---- tool execution ----
+  // ---------------- reload card (sidebar can't load in this tab) ----------------
+  const RELOAD_ID = "orbit-reload-card";
+  const showReloadCard = () => {
+    document.getElementById(RELOAD_ID)?.remove();
+    const el = document.createElement("div");
+    el.id = RELOAD_ID;
+    el.style.cssText = "all:initial;position:fixed;top:14px;right:14px;z-index:2147483647;";
+    const root = el.attachShadow({ mode: "closed" });
+    root.innerHTML = `<style>
+      .card{font:13px/1.4 -apple-system,system-ui,sans-serif;width:286px;padding:14px 14px 12px;border-radius:22px;color:#1d1d1f;
+        -webkit-backdrop-filter:blur(30px) saturate(180%);backdrop-filter:blur(30px) saturate(180%);background:rgba(250,250,250,.88);
+        box-shadow:0 0 0 .5px rgba(0,0,0,.12),0 12px 36px rgba(0,0,0,.2);animation:in .3s cubic-bezier(.2,.8,.2,1)}
+      @media (prefers-color-scheme: dark){.card{background:rgba(44,44,46,.88);color:#f5f5f7;box-shadow:0 0 0 .5px rgba(255,255,255,.12),0 12px 36px rgba(0,0,0,.5)}.sub{color:#a1a1a6!important}}
+      @keyframes in{from{opacity:0;transform:translateY(-8px) scale(.97)}to{opacity:1;transform:none}}
+      .t{font-weight:600}.sub{color:#6e6e73;font-size:12px;margin-top:2px}
+      .b{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
+      button{all:unset;cursor:default;padding:5px 13px;border-radius:999px;font-weight:550;background:rgba(127,127,127,.16)}
+      button.primary{background:#0a84ff;color:#fff}
+    </style><div class="card"><div class="t">Reload to use Orbit here</div>
+      <div class="sub">This tab was open while Orbit was updated, or the site blocks the sidebar.</div>
+      <div class="b"><button class="close">Not Now</button><button class="primary reload">Reload Page</button></div></div>`;
+    root.querySelector(".reload")!.addEventListener("click", () => location.reload());
+    root.querySelector(".close")!.addEventListener("click", () => {
+      el.remove();
+      browser.runtime.sendMessage({ kind: "toggle_panel_closed" }).catch(() => {});
+    });
+    document.documentElement.appendChild(el);
+  };
+
+  // ---------------- routing notice ("Opened in University") ----------------
+  let noticeTimer: any = null;
+  const showRouteNotice = (text: string, url?: string, tone = "routed") => {
+    document.getElementById(NOTICE_ID)?.remove();
+    const el = document.createElement("div");
+    el.id = NOTICE_ID;
+    el.style.cssText = "all:initial;position:fixed;left:0;right:0;top:14px;display:flex;justify-content:center;pointer-events:none;z-index:2147483647;";
+    const root = el.attachShadow({ mode: "closed" });
+    root.innerHTML = `<style>
+      .pill{pointer-events:auto;font:500 12.5px -apple-system,system-ui,sans-serif;display:flex;gap:10px;align-items:center;padding:7px 7px 7px 14px;border-radius:999px;
+        -webkit-backdrop-filter:blur(30px) saturate(180%);backdrop-filter:blur(30px) saturate(180%);background:rgba(250,250,250,.86);color:#1d1d1f;
+        box-shadow:0 0 0 .5px rgba(0,0,0,.12),0 8px 28px rgba(0,0,0,.18);animation:in .35s cubic-bezier(.2,.8,.2,1)}
+      @media (prefers-color-scheme: dark){.pill{background:rgba(44,44,46,.86);color:#f5f5f7;box-shadow:0 0 0 .5px rgba(255,255,255,.12),0 8px 28px rgba(0,0,0,.5)}}
+      @keyframes in{from{opacity:0;transform:translateY(-10px) scale(.97)}to{opacity:1;transform:none}}
+      .ic{font-size:14px}.warn{color:#ff9f0a}
+      button{all:unset;cursor:default;padding:4px 11px;border-radius:999px;background:rgba(127,127,127,.16);font-weight:550}
+      button:hover{background:rgba(127,127,127,.26)}
+    </style><div class="pill"><span class="ic ${tone === "failed" ? "warn" : ""}">${tone === "failed" ? "⚠︎" : "↗︎"}</span><span class="t"></span>${url ? "<button>Open Here Instead</button>" : ""}</div>`;
+    (root.querySelector(".t") as HTMLElement).textContent = text;
+    root.querySelector("button")?.addEventListener("click", () => {
+      el.remove();
+      browser.runtime.sendMessage({ kind: "route_here", url, newTab: false }).catch(() => {});
+    });
+    document.documentElement.appendChild(el);
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => el.remove(), tone === "failed" ? 7000 : 4500);
+  };
+
+  // ---------------- link routing (lossless: the page never navigates) ----------------
+  const routedTarget = (url: string): string | null => {
+    const c = cfg;
+    if (!c?.routing?.active || !/^https?:/i.test(url)) return null;
+    const t = routeTarget(url, c.routing.rules || []);
+    if (!t || t === c.profileId || !(c.profiles || []).some((p: any) => p.id === t)) return null;
+    return t;
+  };
+  const onLinkClick = (e: MouseEvent) => {
+    if (!e.isTrusted || (e.button !== 0 && e.button !== 1) || e.ctrlKey || e.shiftKey) return;
+    const path = (e.composedPath?.() || []) as any[];
+    const a = path.find((n) => n instanceof HTMLAnchorElement && n.href) as HTMLAnchorElement | undefined;
+    if (!a || a.hasAttribute("download")) return;
+    const url = a.href;
+    if (!routedTarget(url)) return;
+    // Same-page anchors stay here.
+    try {
+      const u = new URL(url), here = new URL(location.href);
+      if (u.origin === here.origin && u.pathname === here.pathname && u.search === here.search && u.hash) return;
+    } catch { return; }
+    const newTab = e.metaKey || e.button === 1 || (!!a.target && a.target !== "_self");
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (e.altKey) {
+      // ⌥ Option-click: open in this profile anyway.
+      browser.runtime.sendMessage({ kind: "route_here", url, newTab }).catch(() => {});
+      return;
+    }
+    browser.runtime.sendMessage({ kind: "route_link", url, newTab }).catch(() => {
+      // The extension can't be reached: don't leave the user stuck.
+      if (newTab) window.open(url, "_blank", "noopener");
+      else location.assign(url);
+    });
+  };
+  window.addEventListener("click", onLinkClick, true);
+  window.addEventListener("auxclick", onLinkClick, true);
+
+  // ---------------- tool execution ----------------
   const pageInfo = () => ({ url: location.href, title: document.title });
 
   const runTool = (name: string, args: any): any => {
@@ -311,12 +524,27 @@ function main() {
     try {
       switch (msg.kind) {
         case "panel_state":
-          return { ok: true, open: !!panelHost };
+          return { ok: true, open: !!panelHost && wanted };
+        case "panel_ready":
+          markReady();
+          return { ok: true };
+        case "panel_geometry":
+          return { ok: true, open: !!panelHost && wanted, reserve: reserve(), viewportWidth: window.innerWidth, dpr: window.devicePixelRatio };
         case "ping":
           return { ok: true, ...pageInfo() };
         case "tool": {
-          const text = runTool(msg.name, msg.args || {});
-          return { ok: true, text, ...pageInfo() };
+          // Synthesized input focuses page elements; if the user was typing in the
+          // composer, give keyboard focus back so keystrokes don't land in the page.
+          const hadFocus = !!panelHost && document.activeElement === panelHost;
+          try {
+            const text = runTool(msg.name, msg.args || {});
+            return { ok: true, text, ...pageInfo() };
+          } finally {
+            if (hadFocus && document.activeElement !== panelHost) {
+              stats.focusRestores++;
+              focusPanel();
+            }
+          }
         }
         case "describe": {
           // Element facts used by the background approval policy.
@@ -337,26 +565,15 @@ function main() {
         case "context":
           return { ok: true, selection: getSelectionText().slice(0, 8000), ...pageInfo() };
         case "panel":
-          if (msg.action === "show") showPanel(msg.width);
+          if (msg.action === "show") showPanel(msg.width, !!msg.focus);
           else if (msg.action === "hide") hidePanel();
-          else if (msg.action === "toggle") (panelHost ? hidePanel() : showPanel(msg.width));
-          return { ok: true, open: !!panelHost };
-        case "capture_prepare":
-          stopFixing();
-          if (panelHost) panelHost.style.visibility = "hidden";
-          if (indicator) indicator.style.visibility = "hidden";
-          applyPush(false);
-          return { ok: true };
-        case "capture_restore":
-          if (panelHost) {
-            panelHost.style.visibility = "visible";
-            applyPush(true);
-            startFixing();
-          }
-          if (indicator) indicator.style.visibility = "visible";
-          return { ok: true };
+          else if (msg.action === "toggle") (wanted ? hidePanel() : showPanel(msg.width, true));
+          return { ok: true, open: wanted };
         case "indicator":
           setIndicator(!!msg.active);
+          return { ok: true };
+        case "route_notice":
+          showRouteNotice(String(msg.text || ""), msg.url, msg.tone);
           return { ok: true };
         case "history":
           if (msg.action === "back") history.back();
@@ -384,33 +601,35 @@ function main() {
 
   // Keyboard shortcut fallback (Option-Command-K) when page has focus.
   const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey && e.altKey && !e.shiftKey && !e.ctrlKey && (e.key === "k" || e.key === "K" || e.code === "KeyK")) {
-        e.preventDefault();
-        e.stopPropagation();
-        browser.runtime.sendMessage({ kind: "toggle_panel" }).catch(() => {});
-      }
+    if (e.metaKey && e.altKey && !e.shiftKey && !e.ctrlKey && (e.key === "k" || e.key === "K" || e.code === "KeyK")) {
+      e.preventDefault();
+      e.stopPropagation();
+      browser.runtime.sendMessage({ kind: "toggle_panel" }).catch(() => {});
+    }
   };
   window.addEventListener("keydown", onKey, true);
 
-  const hadPanel = !!document.querySelector(PANEL_HOST_TAG);
   document.querySelectorAll(PANEL_HOST_TAG).forEach((e) => e.remove());
   document.getElementById(INDICATOR_ID)?.remove();
   document.querySelectorAll("style[data-safari-agent]").forEach((e) => e.remove());
   w.__safariAgentDispose = () => {
     try { browser.runtime.onMessage.removeListener(onMessage); } catch { /* orphaned */ }
+    try { browser.storage.onChanged.removeListener(onStorage); } catch { /* orphaned */ }
     if (w.__safariAgentHandle === handleRequest) w.__safariAgentHandle = undefined;
     document.removeEventListener("visibilitychange", onVisible);
     window.removeEventListener("pageshow", sync);
     window.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("click", onLinkClick, true);
+    window.removeEventListener("auxclick", onLinkClick, true);
+    hostGuard?.disconnect();
     hidePanel();
     setIndicator(false);
   };
-  if (hadPanel) showPanel();
 
-  // Announce ourselves: wakes the background (which reconnects to the native
-  // helper if needed) and restores the panel if it is open globally. Repeated
-  // whenever the tab becomes visible again, so the panel survives tab switches,
-  // back/forward cache restores and background-tab suspension.
+  // Announce ourselves: wakes the background (which reconnects to the Orbit
+  // app if needed) and restores the panel if it is open in this tab. Repeated
+  // whenever the tab becomes visible again. A failed or unclear answer never
+  // hides the panel — only an explicit "closed" does.
   const sync = () => {
     let p: Promise<any>;
     try {
@@ -423,14 +642,11 @@ function main() {
       return;
     }
     p.then((r: any) => {
-      if (!r) return;
+      if (!r?.ok) return;
       if (r.panelOpen && r.mode === "page") showPanel(r.width);
-      else if (!r.panelOpen) hidePanel();
+      else if (!r.panelOpen && wanted) hidePanel();
       setIndicator(!!r.agentActive);
-    }).catch(() => {
-      hidePanel();
-      setIndicator(false);
-    });
+    }).catch(() => { /* background busy or restarting: keep what is shown */ });
   };
   const onVisible = () => { if (document.visibilityState === "visible") sync(); };
   document.addEventListener("visibilitychange", onVisible);

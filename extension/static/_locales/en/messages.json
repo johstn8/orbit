@@ -1,4 +1,4 @@
 {
-  "extension_name": { "message": "Safari Agent" },
-  "extension_description": { "message": "An AI browser assistant and agent for Safari, powered by your Claude or ChatGPT subscription." }
+  "extension_name": { "message": "Orbit" },
+  "extension_description": { "message": "Profiles, website routing, shared logins and an AI browser agent for Safari, powered by your Claude or ChatGPT subscription." }
 }

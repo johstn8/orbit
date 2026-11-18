@@ -1,100 +1,108 @@
 # Technical report
 
-Date: 2026-11-14, updated 2026-11-18. Environment: macOS 27.3 (26C5035r), Safari 27.3, Xcode 27.2, Claude Code 2.1.289, Node 24.21.
+Orbit 1.0.0, 2026-11-18. Environment: macOS 27.3, Safari 27.3, Xcode 27.2, Swift 6.4 (Swift 5 mode), Node 24.21, Claude Code 2.1.x.
 
-## What was built
+Earlier history: 0.1.0 ("Safari Agent") was the AI sidebar alone. Its real-Safari acceptance results were Claude 17/17 and ChatGPT 15/15, recorded on 2026-11-14 and listed at the end.
 
-- **Safari Web Extension** (MV3, TypeScript):
-  - Toolbar button and ⌥⌘K command; page-attached glass sidebar (resizable, light and dark, Claude and ChatGPT themes).
-  - Composer with a model/effort picker and an approval-mode pill; markdown with syntax highlighting; streaming; history; new chat; stop; error and connection states.
-  - 16 browser tools: `tabs_list`, `read_page`, `get_page_text`, `find`, `get_selection`, `click`, `type_text`, `form_input`, `press_key`, `scroll`, `navigate`, `switch_tab`, `open_tab`, `close_tab`, `screenshot`, `wait`.
-- **Safari Agent.app** (Swift):
-  - A menu-bar helper with a status window.
-  - The loopback WebSocket hub and a Claude Code runner with an MCP stdio bridge.
-  - The ChatGPT Sign in with ChatGPT flow with a Responses API agent loop.
-  - Keychain storage and conversation persistence.
-- **Sandboxed Safari extension handler** that hands out the helper's connection secret.
-- **Tests**: unit (TypeScript and Swift), an integration test, and a real-Safari end-to-end suite with a local test site.
+## What changed in 1.0.0
 
-## Providers
+- **New:**
+  - Profile picker: five Liquid Glass designs, global shortcut, menu bar.
+  - Orbit as the default browser for links from other apps.
+  - Website routing inside Safari and for external links.
+  - Opt-in shared logins.
+  - Browser access with three levels (including all windows and profiles).
+  - Computer access with three levels (file tools and optional shell commands).
+  - Per-profile extension instances with per-profile chat history.
+  - New settings window, rename to **Orbit**, new icons (app: white sparkles on blue; extension: blue sparkles, no background).
+  - Profiles follow Safari (names, icons, order, default; colors with Full Disk Access), with per-profile Customize.
+  - The picker focuses windows through Safari's UI, on the display and Space where it was used.
+  - Safari's Dock icon with no window open opens a profile window or shows the profiles in a row.
+  - Shared logins suggest ChatGPT and Google, allow several entries per site, and warn about overlapping targets.
+- **Fixed** (root causes below): slow initial load, the sidebar disappearing, lost composer focus, laggy resizing, and the composer's website badge (removed).
 
-| Provider | Status | Evidence |
-|---|---|---|
-| Claude | **Works as a full browser agent** | Subscription login (`authMethod: claude.ai`); 15/15 real-Safari acceptance tests; models Opus/Sonnet/Haiku 5.5 and Fable 5.2 selectable; effort low/medium/high/max |
-| ChatGPT | **Works as a full browser agent** | Signed in through OpenAI's official flow (dynamic client registration, `chatgpt.tokens.use.direct` granted); model discovery returned 8 models; 15/15 real-Safari acceptance tests; reasoning effort accepted |
-
-## Test results (all executed on this machine)
+## Test results (all executed on this Mac; no prompt-sending tests were run)
 
 | Suite | Result |
 |---|---|
-| TypeScript unit tests (`extension: npm test`) | **26/26 pass**. They found and fixed two bugs: code blocks crashed the markdown renderer (marked v12 API), and the "never" mode skipped the close-tab approval |
-| Swift unit tests (`scripts/test-native.sh`) | **47/47 pass**: RS256 verification with a rebuilt RSA key, ID-token claims, the PKCE RFC 7636 vector, OAuth callback validation (state, host, duplicates, denial), form encoding, SSE parsing, history compaction, the live WebSocket server refusing web origins, error mapping |
-| Integration: helper + real Claude + MCP bridge (scripted browser) | **Pass**: tool calls, multi-turn context, cancellation, persistence |
-| Real Safari e2e with **Claude** (`--provider claude`) | **15/15 pass**; re-run after the redesign: 15/15 |
-| Real Safari e2e with **ChatGPT** (`--provider chatgpt`) | **15/15 pass**; re-run after the redesign: 15/15. After the final install, one run had a flaky failure: in F1b the form submission didn't arrive within the test's 10-second window, which cascaded into four later checks. The immediate full re-run passed 15/15 |
-| Real Safari e2e with **Claude** on the final installed build | **17/17 pass**. Added tests: F6, “This tab only” keeps other tabs private; G, the sidebar opens only in its own tab |
-| App-shell layout check (`test-site/app-shell.html`) | With the sidebar open, a fixed full-screen app's right-edge button moves from x=1363 to x=855 and a bottom-right widget moves left; both stay visible next to the sidebar and are restored exactly on close |
-| ChatGPT e2e after the latest changes (tab scope, per-tab sidebar, fixed-layer handling) | **Not re-run**: the user was using the ChatGPT panel at the time, and a test run would have collided with their chats. The changes are in the provider-independent extension layer that the Claude run exercised |
-| Changes after 2026-11-14 (team signing, chatgpt.com layout fix) | Typecheck and 26/26 TypeScript unit tests pass. `codesign --verify --deep --strict` passes on the installed app. The user confirmed that the extension stays enabled after quitting and reopening Safari, and that chatgpt.com now makes room for the sidebar. **Prompt-sending suites (e2e, integration) were not re-run** at the user's request; they use plan quota |
+| TypeScript unit tests (`cd extension && npm test`) | **50/50 pass**: 26 earlier ones, plus 24 routing-pattern tests from the shared fixture `tests/fixtures/routing-cases.json` |
+| Swift unit tests (`scripts/test-native.sh`) | **105/105 pass**: 47 earlier ones, plus the routing fixture, path policy, tool catalog, settings decoding, profile-name parsing, Safari AX identifiers, placeholder→extension id migration, shared-login conflicts and prompt context. Details below the table |
+| Real cross-profile routing (real Safari, your profiles) | With a temporary rule (test page → Universität), a URL set in a Personal tab via Safari's UI was stopped (`stopped: 1`) and opened in Universität (`routed: 1`). The Personal tab kept its URL. The rule was removed afterwards |
+| Picker focus through Safari's UI | `focus(Quant)` raised Quant's window while Quant's extension was asleep, and `focus(Personal)` brought Personal back (front window checked via AX) |
+| Profiles from Safari | Names, default flag and icons were read from Safari (Personal `person.fill`, Universität `graduationcap.fill`, Quant `bag.fill`); the deleted "Privat" profile disappeared |
+| Sidebar in a fresh tab | Ready after 24–41 ms (panel confirmed); clean rounded corners (screenshot including the sidebar) |
+| Sidebar in a tab left over from an update | The frame never confirmed; the sidebar was removed and the single reload card shown (screenshot) |
+| Typecheck, Release build, team signing | Pass. `codesign --verify --deep --strict` on the installed `~/Applications/Orbit.app` passes |
+| Prompt-free real-Safari checks (test driver, local test site) | **16/16 pass.** Details below the table |
+| Navigation-stop experiment (real Safari) | `window.stop()` from `onBeforeNavigate` kept the page and its JS state with server delays of 0/150/600 ms. `declarativeNetRequest` replaced the page with Safari's "blocked by a content blocker" page, and Back did not restore it. A plain navigation + Back restored the state (bfcache) |
+| Routing failure path (real Safari, fake target profile) | The navigation was stopped (`stopped: 1`). Routing failed as expected (profile unreachable, no Accessibility), `failed: 1`, and the fallback ran |
+| Picker designs | Rendered offscreen with `--render-designs` to check layout and placement of all five designs (glass replaced by flat surfaces offscreen). Overlaps found and fixed: the Control Center grid was too wide, the Orbit caption collided with a name, the Arc was too tight, the Pearls highlight was too strong |
+| Claude / ChatGPT agent e2e | **Not re-run**: they consume subscription quota, and you asked to skip them. The provider code paths are unchanged apart from the tool catalog and context lines |
 
-What the real-Safari e2e suite verifies (each action is checked through the page's own event log on the test server and by re-reading page state):
+The new Swift tests cover:
+- **Path policy:** symlink escape, `..`, sibling-prefix folders, credential stores, the full-access write limit and the none tier.
 
-- **A**: the accessibility tree has labeled controls; the password is redacted.
-- **D**: the summary reflects actual page content.
-- **C**: streaming arrives in many deltas.
-- **E1**: two real clicks; the agent reports the observed counter.
-- **C2**: a follow-up keeps context.
-- **E2**: text, email, select and checkbox are set and verified; the form is not submitted.
-- **F1**: a submit needs approval; denial is respected and nothing is submitted.
-- **F1b**: after approval the submit executes and the agent reads the result page.
-- **E3**: follows the docs link and extracts the install command.
-- **E4**: compares two tabs and ignores a hidden prompt injection (no clicks).
-- **E5**: `switch_tab` changes Safari's front tab.
-- **F2**: with the user viewing another tab, the action lands on the task's bound tab and the user's tab stays in front.
-- **F3**: a blank tab and a `javascript:` URL return errors, and the extension stays connected.
-- **F4**: typing into a password field is refused (also via its label).
-- **F5**: cancel stops a running generation.
+The prompt-free real-Safari checks verify:
+- Screenshots are cropped to the page and downscaled (927×1622 instead of the full 2758 px window with the sidebar).
+- The sidebar is not rebuilt during six tool calls including two screenshots (`panelCreates 1`, `panelHides 0`).
+- `fs_write`, `fs_edit`, `fs_read`, `fs_search` and `fs_list` work inside the allowed folder.
+- Access outside the folder, `~/.ssh`, and commands without full access are all refused.
+- `fs_trash` asked in the panel and was denied, and the file was kept.
+- With no computer access, the tools are refused.
+- A HttpOnly login cookie was exported and re-imported with a changed value.
 
-UI verified visually in real Safari (screenshots of the Safari window):
-- The panel renders in dark mode in both themes, and tool steps collapse to “Used N browser actions ›”.
-- The model and effort picker labels show in the composer, and the panel survives switching tabs away and back.
-- A task submitted through the panel's own send path (background → helper → provider) completed and rendered.
+**Not verified yet**, because it needs your Safari setup:
+- **Cross-profile success paths:** opening links in another profile, routing into another profile, shared logins between two real profiles, and the agent with "All windows and profiles". During development only one profile's instance was connected, because the extension had to be turned on in the other profiles first.
+- **Picker Space and display handling, and the Dock-icon action:** these need your mouse and multiple Spaces/displays.
+- **Picker as a live window and the default-browser flow:** these need your mouse and keyboard and the macOS confirmation dialog.
+- **The real Liquid Glass look of the picker:** offscreen snapshots can't render glass.
 
-Not verified by me (this needs your mouse or keyboard; I had no GUI input into Safari):
-- Physically clicking the toolbar button, the ⌥⌘K shortcut, and clicking inside the panel (opening the picker menu, the Allow button, typing in the composer).
-  - These code paths are covered indirectly: the panel was opened and messages were sent through the same background handlers, and approvals were answered through the mirrored approval channel.
-- The separate-window fallback on Safari's Start Page.
+## Root causes fixed (sidebar)
 
-## Bugs found and fixed during real-Safari testing
+1. **Slow initial load:**
+   - **Multiple profiles.** 0.1.0's helper allowed only one extension connection: `if let old = extensionClient { old.close() }`. With Orbit enabled in several Safari profiles, their instances closed each other's connections and reconnected with exponential backoff (0.5 s → 15 s). Panels sat in "Connecting…", and tool calls could go to the wrong profile's instance. Fix: one connection **per profile**, with routing by profile.
+   - **Lost first state.** The panel connected its Port at module load, but React subscribed only after mounting. A state message arriving in between was dropped, and the panel showed its spinner until the next 20 s keep-alive ping. Observed: a spinner several seconds after opening, then the full panel. Fix: cache the last state and render from it.
+   - **Cold provider status.** After 60 s the Claude status cache expired, and `providers.list` waited for `claude --version` and `claude auth status`. Fix: answer from the last status and refresh in the background. The extension also caches the providers.
+2. **Sidebar disappears briefly:**
+   - Screenshots hid the panel and removed the page margin (two reflows and a visible flash). Fix: capture with the panel visible and crop it out.
+   - Any rejected `hello` (background restarting) called `hidePanel()`, which destroyed the iframe. Fix: only an explicit "closed" hides it.
+   - The host lived in `<body>`, which app frameworks re-render. Fix: attach to `<html>` and guard it.
+3. **Lost composer focus:** synthesized clicks and typing call `focus()` on page elements, which moves keyboard focus out of the panel iframe. Fix: restore focus right after the tool when the composer had it; hand drafts and focus over across navigations.
+4. **Laggy resizing:**
+   - Each `pointermove` rewrote `html{margin-right}` with a 250 ms transition: a full page relayout per event, all the time.
+   - The fixed-layer adjuster walked up to 6000 elements with `getComputedStyle` + `getBoundingClientRect`, interleaving reads and writes, every 2 s and after every mutation burst. That blocked the shared main thread, especially while pages loaded.
+   - Fix: rAF-driven card resizing, a throttled margin without transition, one CSS variable for all adjusted layers, and an incremental, time-sliced scanner. The measured max slice was 1 ms on the test app shell.
+5. **Other bugs found along the way:**
+   - Screenshots were never downscaled: `createImageBitmap` failed silently in Safari's background page, so full-resolution images went to the model. Fixed with an `<img>` decode.
+   - `install.sh` could start the new app while the old process was still quitting, so `open` re-activated the old one and old code kept running. Fixed by waiting for the exit.
 
-1. `get_page_text` ignored navigation links outside `<main>`, so the agent couldn't find the "Documentation" link. Fixed: link summary added.
-2. `find` ranked a `<label>` above its input, so typing hit the label. Fixed: controls are ranked first and labels resolve to their control.
-3. Tool messages targeted with `{frameId: 0}` silently failed in some tabs. Fixed: the frame option is dropped and re-injection is self-healing.
-4. Your report: “the sidebar disappears after leaving and returning to a tab”. Several causes, all fixed:
-   - Extension reloads orphaned the content scripts.
-   - Returning to a tab didn't re-inject the panel.
-   - Two helper instances (the Xcode DerivedData copy and `build/`) overwrote each other's connection file.
-   - The fixes: visibility/pageshow re-sync, re-injection on tab activation, a single-instance helper, owner-only removal of the connection file, and only one registered app copy.
-5. A Keychain access prompt (each ad-hoc rebuild has a new signature) blocked helper startup. Later it also blocked all Swift concurrency worker threads. Fixed: the Keychain is read once on a dedicated queue, and ChatGPT reports "Waiting for Keychain access" meanwhile. Provider status checks also time out after 8 seconds per provider, so one slow provider never blocks the other.
-6. The toolbar button didn't open the sidebar. It toggled a global flag instead of the current tab's state, and on some tabs Safari stopped delivering `tabs.sendMessage` to the content script altogether (reproduced on chatgpt.com after an extension update). Fixed:
-   - All background→page calls now go through `scripting.executeScript` into a handler registered by the content script (`background/tabrpc.ts`), re-injecting it when missing.
-   - The toggle reads the tab's real panel state.
-7. Tabs that were open while the extension was updated can't load the sidebar frame (Safari limitation). The sidebar now detects this after 3.5 seconds and offers **Reload Page**. The same notice covers sites that block embedded frames.
-8. Your report: "the extension is gone after restarting Safari". Ad-hoc builds need "Allow unsigned extensions", which Safari resets on quit. Fixed: builds are now signed with your Apple Development team, so the extension stays enabled. The `build/` copy also failed strict codesign verification because of extended attributes from the copy step; it is now copied with `ditto --norsrc --noextattr --noacl`.
-9. Your report: "on chatgpt.com the sidebar still covers the page". Two causes:
-   - ChatGPT's app shell is an in-flow element exactly `100vw` wide, which ignores the page margin.
-   - Its fixed header layer starts right of the icon rail (x=52), so the shift rule moved it left instead of narrowing it.
-   - Fixed: `100vw` elements are capped to the remaining width, and wide fixed layers (≥ 40 % of the viewport) are pinned and narrowed instead of shifted.
+## Bugs found in the second round
+
+1. **Blank sidebar after the first fix** (found in testing, never shipped). Safari masks extension iframe URLs for content scripts: `iframe.src` reads `…url://hidden/`. So `src += "&n=…"` produced an invalid URL and the frame never loaded. The URL is now built once and never read back.
+2. **Rectangular shadow at the sidebar corners:** `contain: strict` (paint containment) cut the card's shadow at the host box. Fixed with a separate shadow layer, no paint containment, and `clip-path` for the frame.
+3. **Routing missed some navigations or left duplicate tabs:**
+   - When a navigation woke the background, the rules weren't loaded yet. Routing now waits for them.
+   - A tab the background had never seen counted as empty, which could close a real tab after routing. Now only tabs created in the last 15 s with no page count as new. Unknown tabs are stopped where possible, otherwise sent back, and closed only if they turn out to have no history.
+4. **Picker did nothing for sleeping profiles:** it relied on the profile's extension. It now uses Safari's UI, and activates Safari via AX `frontmost` (plain activation from a background app is ignored by macOS 14+).
+5. **Agent glow on test pages:** test-driver tool runs no longer show "Agent is working".
 
 ## Remaining limitations
 
-- **Signing**: persistent installs need an Apple Development certificate; a free personal team is enough. Ad-hoc builds still work, but they need "Allow unsigned extensions" after every Safari launch, and the Keychain asks again after every rebuild.
-- **No native side panel**: Safari 27 doesn't support `side_panel`, so the panel is page-attached. Pages that block content scripts (Safari settings, Start Page, the App Store, other extensions' pages) get a separate window instead, and the agent can't act on them.
-- **Synthesized input**: input is synthesized in the DOM because Safari has no `debugger` API.
-  - `isTrusted` is false. Sites that require trusted events, popups that require a user gesture (handled for `target=_blank` links by opening an agent tab), file uploads, canvas apps and drag-and-drop may not work.
-  - Cross-origin iframes can be listed but not read or operated.
-- **Screenshots**: only the active tab of a window can be captured.
-- **Fable 5.2**: listed because your Pro plan currently includes it; it was not exercised in the tests.
-- **After updates**: when the extension is updated or reinstalled, tabs that were already open must be reloaded once before the sidebar can dock there. The sidebar offers a Reload button; agent tools keep working in those tabs.
-- **SIWC trial**: “Sign in with ChatGPT” is a limited trial for selected partners and open-source apps. It worked here through dynamic registration, but OpenAI may change eligibility.
-- **Long conversations**: older ChatGPT history is capped at 300 items with screenshots stripped. Claude history is managed by Claude Code (`--resume`).
+- **Profile identity and names:**
+  - Safari didn't provide `SFExtensionProfileKey` here, so ids are per-instance random ids in per-profile storage.
+  - If you clear Safari's extension data for a profile, it appears as a new profile; rename it or forget the old entry in Settings.
+  - Names and icons need Accessibility; colors need Full Disk Access (otherwise Orbit's colors). Icons are known once a window of the profile has been seen.
+- **Reachability:** a profile is reachable while its extension instance runs. Without Accessibility, a profile with no windows can't be opened by Orbit, and links then open in Safari normally with a notice.
+- **Typed URLs:** stopping relies on a race of about 20–30 ms. If the new page commits first, Orbit goes back. Pages that aren't bfcache-eligible are then reloaded rather than restored. Form POSTs to routed URLs are re-opened as plain GET URLs in the target profile.
+- **Shared logins:** this is a cookie copy, not a protocol-level session share.
+  - Device-bound sessions, passkey-only sites, CHIPS-partitioned cookies and sites that invalidate a session used from two places may not work.
+  - Sign-out isn't mirrored.
+  - A target updates only while its profile runs.
+- **Agent:** input is synthesized, cross-origin iframes are read-only, and only the visible tab can be captured. Shell commands run with your user's rights (each one approved).
+- **Picker:** Liquid Glass needs macOS 26+; older systems get a material fallback.
+
+## 0.1.0 results (for reference)
+
+- **Real-Safari acceptance (2026-11-14):** Claude 17/17 and ChatGPT 15/15 (one flaky run, then a clean re-run), on the local test site.
+  - Covered: accessibility tree, clicks, typing, forms, submit approval, navigation, tab compare with prompt injection ignored, `switch_tab`, tab binding, error handling, password refusal, cancel, tab scope and per-tab sidebar.
+- **Bugs fixed then:** link summary in `get_page_text`; label vs input ranking; `frameId:0` delivery; orphaned content scripts; duplicate helpers; Keychain prompt blocking; toolbar toggle per tab; reload notice; chatgpt.com app-shell overlap.

@@ -21,6 +21,15 @@
           "children": [
             { "path": "main.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
             { "path": "AppDelegate.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
+            { "path": "SettingsView.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
+          ],
+        },
+        {
+          "kind": "group",
+          "path": "Picker",
+          "children": [
+            { "path": "PickerController.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
+            { "path": "PickerDesigns.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
           ],
         },
         {
@@ -33,6 +42,12 @@
             { "path": "ConversationStore.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
             { "path": "Hub.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
             { "path": "MCPBridge.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
+            { "path": "AppSettings.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
+            { "path": "NativeTools.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
+            { "path": "Profiles.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
+            { "path": "Routing.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
+            { "path": "SessionSharing.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
+            { "path": "SafariDockWatcher.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
           ],
         },
         {
@@ -82,7 +97,7 @@
       "kind": "group",
       "name": "Products",
       "children": [
-        { "path": "<PRODUCTS>/Safari Agent.app", "id": "5A0E00000000000000000001", "type": "wrapper.application", "index": false },
+        { "path": "<PRODUCTS>/Orbit.app", "id": "5A0E00000000000000000001", "type": "wrapper.application", "index": false },
         { "path": "<PRODUCTS>/SafariAgentExtension.appex", "id": "5A0E00000000000000000002", "type": "wrapper.app-extension", "index": false, "target-membership": [ { "build-phase": "SafariAgent/copy/Embed Foundation Extensions", "header-preservation": "remove-on-copy" } ] },
       ],
     },
@@ -91,7 +106,7 @@
     {
       "name": "SafariAgent",
       "id": "5A0E00000000000000000010",
-      "product": "Products/Safari Agent.app",
+      "product": "Products/Orbit.app",
       "product-type": "application",
       "dependencies": [
         "SafariAgentExtension",
@@ -112,12 +127,12 @@
         "CODE_SIGN_IDENTITY": "-",
         "CODE_SIGN_STYLE": "Manual",
         "COMBINE_HIDPI_IMAGES": "YES",
-        "CURRENT_PROJECT_VERSION": "1",
+        "CURRENT_PROJECT_VERSION": "2",
         "ENABLE_APP_SANDBOX": "NO",
         "ENABLE_HARDENED_RUNTIME": "NO",
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_FILE": "SafariAgent/Info.plist",
-        "INFOPLIST_KEY_CFBundleDisplayName": "Safari Agent",
+        "INFOPLIST_KEY_CFBundleDisplayName": "Orbit",
         "INFOPLIST_KEY_LSApplicationCategoryType": "public.app-category.productivity",
         "INFOPLIST_KEY_NSHumanReadableCopyright": "",
         "INFOPLIST_KEY_NSPrincipalClass": "NSApplication",
@@ -126,14 +141,14 @@
           "@executable_path/../Frameworks",
         ],
         "MACOSX_DEPLOYMENT_TARGET": "14.0",
-        "MARKETING_VERSION": "1.0",
+        "MARKETING_VERSION": "1.0.0",
         "OTHER_LDFLAGS": [
           "-framework",
           "SafariServices",
         ],
         "PRODUCT_BUNDLE_IDENTIFIER": "dev.local.SafariAgent",
         "PRODUCT_MODULE_NAME": "SafariAgent",
-        "PRODUCT_NAME": "Safari Agent",
+        "PRODUCT_NAME": "Orbit",
         "SWIFT_VERSION": "5.0",
       },
     }, {
@@ -150,12 +165,12 @@
         "CODE_SIGN_ENTITLEMENTS": "SafariAgentExtension/SafariAgentExtension.entitlements",
         "CODE_SIGN_IDENTITY": "-",
         "CODE_SIGN_STYLE": "Manual",
-        "CURRENT_PROJECT_VERSION": "1",
+        "CURRENT_PROJECT_VERSION": "2",
         "ENABLE_APP_SANDBOX": "YES",
         "ENABLE_HARDENED_RUNTIME": "NO",
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_FILE": "SafariAgentExtension/Info.plist",
-        "INFOPLIST_KEY_CFBundleDisplayName": "Safari Agent Extension",
+        "INFOPLIST_KEY_CFBundleDisplayName": "Orbit Extension",
         "INFOPLIST_KEY_NSHumanReadableCopyright": "",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
@@ -163,7 +178,7 @@
           "@executable_path/../../../../Frameworks",
         ],
         "MACOSX_DEPLOYMENT_TARGET": "14.0",
-        "MARKETING_VERSION": "1.0",
+        "MARKETING_VERSION": "1.0.0",
         "OTHER_LDFLAGS": [
           "-framework",
           "SafariServices",

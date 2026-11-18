@@ -7,6 +7,7 @@ final class WSClient: Hashable {
     let connection: NWConnection
     var role: String = "unauthenticated"
     var conversationId: String?   // for MCP bridge clients
+    var profileId: String?        // for extension clients: the Safari profile of the instance
     var onMessage: ((WSClient, JSONObject) -> Void)?
     var onClose: ((WSClient) -> Void)?
     private var closed = false

@@ -2,6 +2,8 @@ import { Marked } from "marked";
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 
+const AUTO_LANGS = ["javascript", "typescript", "python", "bash", "shell", "json", "xml", "css", "swift", "sql", "yaml", "markdown"];
+
 const marked = new Marked({
   gfm: true,
   breaks: false,
@@ -13,7 +15,12 @@ const marked = new Marked({
       const language = lang && hljs.getLanguage(lang) ? lang : undefined;
       let html: string;
       try {
-        html = language ? hljs.highlight(text, { language }).value : hljs.highlightAuto(text).value;
+        // Auto-detection is costly while a block is streaming: limit it to common languages and sizes.
+        html = language
+          ? hljs.highlight(text, { language }).value
+          : text.length > 6000
+            ? text.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!)
+            : hljs.highlightAuto(text, AUTO_LANGS).value;
       } catch {
         html = text.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!);
       }

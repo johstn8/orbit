@@ -24,7 +24,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: "tabs_list",
     description:
-      "List open Safari tabs (id, title, URL, which one is active, and which one is the agent's current tab). Use before switching tabs or comparing tabs.",
+      "List open Safari tabs (id, title, URL, which one is active, and which one is the agent's current tab), grouped by Safari profile when the user allowed access to all profiles. Use before switching tabs or comparing tabs.",
     input_schema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -208,5 +208,16 @@ export const TOOLS: ToolDef[] = [
     },
   },
 ];
+
+// Tab tools can address tabs in other Safari profiles when the user allowed
+// "All windows and profiles": the helper routes the call to that profile.
+const profile = {
+  type: "string",
+  description: "Safari profile name for a tab in another profile (from tabs_list). Omit for the chat's own profile.",
+};
+for (const t of TOOLS) {
+  const props = (t.input_schema as any).properties;
+  if (props && (props.tabId || t.name === "open_tab")) props.profile = profile;
+}
 
 export const TOOL_NAMES = new Set(TOOLS.map((t) => t.name));

@@ -113,6 +113,8 @@ final class ClaudeSession {
     let conversationId: String
     let model: String?
     let effort: String?
+    /// Which tools the MCP bridge offered when the session started.
+    var toolset = ""
     private var process: Process?
     private var stdin: FileHandle?
     private var buffer = Data()
@@ -352,12 +354,14 @@ final class ClaudeProvider: Provider {
         let convId = conversation.id
         var session = sessions[convId]
         let wantModel = model ?? conversation.model
-        if let s = session, (!s.isAlive || s.model != wantModel || s.effort != effort) {
+        let toolset = hub.toolsetKey
+        if let s = session, (!s.isAlive || s.model != wantModel || s.effort != effort || s.toolset != toolset) {
             s.terminate()
             session = nil
         }
         if session == nil {
             let s = ClaudeSession(conversationId: convId, model: wantModel, effort: effort)
+            s.toolset = toolset
             s.onExit = { [weak self, weak s] in
                 hub.queue.async { if let s, self?.sessions[convId] === s { self?.sessions[convId] = nil } }
             }

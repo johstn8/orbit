@@ -40,10 +40,13 @@ struct Conversation: Codable {
     var messages: [UIMessage]
     /// Claude Code session id used to resume the conversation.
     var claudeSessionId: String?
+    /// Safari profile the chat belongs to (history is kept per profile).
+    var profileId: String?
 
     func summaryJSON() -> JSONObject {
         var o: JSONObject = ["id": id, "title": title, "provider": provider, "updatedAt": updatedAt]
         if let model { o["model"] = model }
+        if let profileId { o["profileId"] = profileId }
         return o
     }
     func json() -> JSONObject {
@@ -133,10 +136,10 @@ final class ConversationStore {
         return cache[id]
     }
 
-    func create(provider: String, model: String?, title: String) -> Conversation {
+    func create(provider: String, model: String?, title: String, profileId: String? = nil) -> Conversation {
         loadAll()
         let now = Date().timeIntervalSince1970 * 1000
-        let c = Conversation(id: UUID().uuidString.lowercased(), title: title, provider: provider, model: model, createdAt: now, updatedAt: now, messages: [])
+        let c = Conversation(id: UUID().uuidString.lowercased(), title: title, provider: provider, model: model, createdAt: now, updatedAt: now, messages: [], profileId: profileId)
         cache[c.id] = c
         return c
     }

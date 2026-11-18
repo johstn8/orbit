@@ -8,11 +8,26 @@ import { tabRpc, NoPageAccess } from "./tabrpc";
 
 declare const browser: any;
 
+/** Per-call context from the Orbit app: whose chat it is and what the user allowed. */
+export interface CallContext {
+  /** Profile whose panel the chat belongs to (approvals are shown there). */
+  ownerProfile: string;
+  scope: TabScope;
+  approvalMode: ApprovalMode;
+  /** The chat has read local files: ask before anything could send data to a website. */
+  exfilGuard: boolean;
+}
+
 export interface ExecutorHost {
   approvalMode(): ApprovalMode;
   tabScope(): TabScope;
   isTabAllowed(conversationId: string, tabId: number): boolean;
-  requestApproval(conversationId: string, tool: string, summary: string, reason: string, host?: string): Promise<boolean>;
+  requestApproval(conversationId: string, tool: string, summary: string, reason: string, host?: string, ctx?: CallContext): Promise<boolean>;
+  profileId(): string;
+  lastFocusedWindow(): number | null;
+  panelGeometry(tabId: number): Promise<any>;
+  /** The agent is about to navigate or open a tab: website routing must not take it away. */
+  beforeNavigation(): void;
   agentTab(conversationId: string): { tabId?: number; windowId?: number };
   setAgentTab(conversationId: string, tabId: number, windowId?: number): void;
   setIndicator(tabId: number | undefined, active: boolean): void;
@@ -33,33 +48,46 @@ function hostOf(url?: string) {
 }
 
 const SCOPE_DENIED =
-  "The user has limited Safari Agent to the tab where this chat started (and tabs you open yourself). You cannot read or use other tabs. If the task needs another tab, ask the user to allow “All tabs in this window” (shield menu in the panel), or to open the page in this tab.";
+  "The user has limited Orbit to the tab where this chat started (and tabs you open yourself). You cannot read or use other tabs. If the task needs another tab, ask the user to allow “All tabs in this window” or “All windows and profiles” (shield menu in the panel), or to open the page in this tab.";
 
 const NO_ACCESS =
-  "Safari has not given Safari Agent access to this page. Ask the user to click the Safari Agent toolbar button on this tab and choose “Always Allow on This Website” (or allow all websites in Safari Settings → Extensions → Safari Agent).";
+  "Safari has not given Orbit access to this page. Ask the user to click the Orbit toolbar button on this tab and choose “Always Allow on This Website” (or allow all websites in Safari Settings → Extensions → Orbit).";
+
+const EXFIL_REASON = "This chat has read files on your Mac. Orbit asks before the agent types, submits or navigates on a website.";
+
+const DEFAULT_CTX = (h: ExecutorHost): CallContext => ({ ownerProfile: h.profileId(), scope: h.tabScope(), approvalMode: h.approvalMode(), exfilGuard: false });
 
 export class ToolExecutor {
   constructor(private host: ExecutorHost) {}
 
+  private ctx: CallContext | null = null;
+  private get c(): CallContext { return this.ctx || DEFAULT_CTX(this.host); }
+  private get crossProfile() { return this.c.ownerProfile !== this.host.profileId(); }
+
   /** Enforce the user's tab-access setting for a tab other than the current agent tab. */
   private async checkScope(conversationId: string, tab: any) {
     if (conversationId.startsWith("debug-")) return; // local test driver
+    if (this.c.scope === "all") return;
+    if (this.crossProfile) throw new ToolFailure("The user has not allowed access to other Safari profiles.");
     const bound = this.host.agentTab(conversationId);
     if (tab.id === bound.tabId || this.host.isTabAllowed(conversationId, tab.id)) return;
-    if (this.host.tabScope() === "window") {
+    if (this.c.scope === "window") {
       let win = bound.windowId;
       if (win === undefined && bound.tabId !== undefined) win = (await browser.tabs.get(bound.tabId).catch(() => null))?.windowId;
       if (win === undefined || tab.windowId === win) return;
-      throw new ToolFailure("That tab is in another Safari window. Safari Agent can only use tabs in the window where this chat started.");
+      throw new ToolFailure("That tab is in another Safari window. The user allowed only tabs in the window where this chat started.");
     }
     throw new ToolFailure(SCOPE_DENIED);
   }
 
-  async run(conversationId: string, name: string, args: any): Promise<{ result: ToolResult; summary: string }> {
+  async run(conversationId: string, name: string, args: any, ctx?: CallContext): Promise<{ result: ToolResult; summary: string }> {
     args = args && typeof args === "object" ? args : {};
+    // Each call gets its own view of the executor with its context, so concurrent
+    // calls (e.g. chats from two profiles) never see each other's permissions.
+    const call: ToolExecutor = Object.create(this);
+    call.ctx = ctx || null;
     try {
-      const out = await this.dispatch(conversationId, name, args);
-      return out;
+      return await call.dispatch(conversationId, name, args);
     } catch (e: any) {
       const msg = e?.message || String(e);
       return { result: text(msg, true), summary: msg.slice(0, 160) };
@@ -87,8 +115,12 @@ export class ToolExecutor {
         throw new ToolFailure("The tab this task was working in has been closed. Call tabs_list and switch_tab to choose another tab.");
       }
     }
-    // Unbound (e.g. after a background restart): bind to the active tab of the focused window.
-    const [tab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
+    // Unbound (another profile's chat, or after a background restart): use the active tab
+    // of this profile's most recently used window.
+    const win = this.host.lastFocusedWindow();
+    const [tab] = win !== null
+      ? await browser.tabs.query({ active: true, windowId: win })
+      : await browser.tabs.query({ active: true, lastFocusedWindow: true });
     if (!tab) throw new ToolFailure("No browser tab is available.");
     this.host.setAgentTab(conversationId, tab.id, tab.windowId);
     return tab;
@@ -157,7 +189,7 @@ export class ToolExecutor {
 
   private async approve(conversationId: string, tool: string, summary: string, decision: { reason: string } | null, host?: string) {
     if (!decision) return;
-    const ok = await this.host.requestApproval(conversationId, tool, summary, decision.reason, host);
+    const ok = await this.host.requestApproval(conversationId, tool, summary, decision.reason, host, this.c);
     if (!ok) throw new ToolFailure(`The user denied this action (${summary}). Do not retry it; ask the user how to proceed.`);
   }
 
@@ -172,13 +204,24 @@ export class ToolExecutor {
 
   // ---------- dispatch ----------
 
+  /** The page's "agent is working" glow; not for the local test driver. */
+  private indicator(conversationId: string, tabId: number | undefined, on: boolean) {
+    if (!conversationId.startsWith("debug-")) this.host.setIndicator(tabId, on);
+  }
+
+  /** Approval decision, tightened when the chat has read local files. */
+  private guard(decision: { reason: string } | null, sendsData: boolean) {
+    if (decision) return decision;
+    return this.c.exfilGuard && sendsData ? { reason: EXFIL_REASON } : null;
+  }
+
   private async dispatch(conversationId: string, name: string, args: any): Promise<{ result: ToolResult; summary: string }> {
-    const mode = this.host.approvalMode();
+    const mode = this.c.approvalMode;
     switch (name) {
       case "tabs_list": {
         const bound = this.host.agentTab(conversationId).tabId;
         let all = await browser.tabs.query({});
-        const scope = conversationId.startsWith("debug-") ? "all" : this.host.tabScope(); // test driver sees all
+        const scope = conversationId.startsWith("debug-") ? "all" : this.c.scope; // test driver sees all
         if (scope === "all") {
           /* no filtering */
         } else if (scope === "tab") {
@@ -213,13 +256,14 @@ export class ToolExecutor {
         const tab = await this.resolveTab(conversationId, args.tabId);
         const facts = await this.describe(tab, args);
         const what = facts ? `${facts.role} “${facts.name || facts.tag}”` : `point (${args.x}, ${args.y})`;
-        await this.approve(conversationId, "click", `Click ${what} on ${hostOf(tab.url)}`, clickNeedsApproval(mode, facts), hostOf(tab.url));
+        await this.approve(conversationId, "click", `Click ${what} on ${hostOf(tab.url)}`, this.guard(clickNeedsApproval(mode, facts), !!facts?.submits), hostOf(tab.url));
         // Links that open a new window would be blocked as popups; open them as an agent tab instead.
         if (facts && (facts as any).targetBlank && facts.href && /^https?:/.test(facts.href)) {
+          this.host.beforeNavigation();
           const created = await browser.tabs.create({ url: facts.href, active: true, windowId: tab.windowId });
           this.host.setAgentTab(conversationId, created.id, created.windowId);
-          this.host.setIndicator(tab.id, false);
-          this.host.setIndicator(created.id, true);
+          this.indicator(conversationId, tab.id, false);
+          this.indicator(conversationId, created.id, true);
           const loaded = await this.waitForLoad(created.id);
           return { result: text(`The link opens in a new tab; opened it (tabId=${created.id}) and made it the current tab. Now at: ${loaded.title} — ${loaded.url}`), summary: `Opened ${what} in a new tab` };
         }
@@ -235,9 +279,9 @@ export class ToolExecutor {
         if (facts?.sensitiveField) throw new ToolFailure("This is a password or payment field. The agent does not enter credentials or payment details — ask the user to type it.");
         if (args.submit) {
           const ks = await this.sendToTab(tab, { kind: "key_submits", ref: args.ref, key: "Enter" });
-          await this.approve(conversationId, "type_text", `Type into “${facts?.name || "field"}” and press Enter on ${hostOf(tab.url)}`, submitNeedsApproval(mode, !!ks.submits), hostOf(tab.url));
+          await this.approve(conversationId, "type_text", `Type into “${facts?.name || "field"}” and press Enter on ${hostOf(tab.url)}`, this.guard(submitNeedsApproval(mode, !!ks.submits), true), hostOf(tab.url));
         } else {
-          await this.approve(conversationId, "type_text", `Type into “${facts?.name || "field"}” on ${hostOf(tab.url)}`, genericActionNeedsApproval(mode, "type_text"), hostOf(tab.url));
+          await this.approve(conversationId, "type_text", `Type “${String(args.text ?? "").slice(0, 60)}” into “${facts?.name || "field"}” on ${hostOf(tab.url)}`, this.guard(genericActionNeedsApproval(mode, "type_text"), true), hostOf(tab.url));
         }
         const before = tab.url;
         const r = await this.sendToTab(tab, { kind: "tool", name: "type_text", args });
@@ -249,7 +293,7 @@ export class ToolExecutor {
         const tab = await this.resolveTab(conversationId, args.tabId);
         const facts = await this.describe(tab, args, true);
         if (facts?.sensitiveField) throw new ToolFailure("This is a password or payment field. Ask the user to fill it in.");
-        await this.approve(conversationId, "form_input", `Set “${facts?.name || "field"}” to “${String(args.value).slice(0, 60)}”`, genericActionNeedsApproval(mode, "form_input"), hostOf(tab.url));
+        await this.approve(conversationId, "form_input", `Set “${facts?.name || "field"}” to “${String(args.value).slice(0, 60)}”`, this.guard(genericActionNeedsApproval(mode, "form_input"), true), hostOf(tab.url));
         const r = await this.sendToTab(tab, { kind: "tool", name: "form_input", args });
         if (!r.ok) throw new ToolFailure(r.error);
         return { result: text(r.text), summary: `Set “${facts?.name || "field"}”` };
@@ -258,7 +302,7 @@ export class ToolExecutor {
         const tab = await this.resolveTab(conversationId, args.tabId);
         const ks = await this.sendToTab(tab, { kind: "key_submits", ref: args.ref, key: String(args.key || "") });
         if (!ks.ok) throw new ToolFailure(ks.error);
-        await this.approve(conversationId, "press_key", `Press ${args.key}${ks.info ? ` in “${ks.info.name || ks.info.tag}”` : ""} on ${hostOf(tab.url)}`, submitNeedsApproval(mode, !!ks.submits), hostOf(tab.url));
+        await this.approve(conversationId, "press_key", `Press ${args.key}${ks.info ? ` in “${ks.info.name || ks.info.tag}”` : ""} on ${hostOf(tab.url)}`, this.guard(submitNeedsApproval(mode, !!ks.submits), !!ks.submits), hostOf(tab.url));
         const before = tab.url;
         const r = await this.sendToTab(tab, { kind: "tool", name: "press_key", args });
         if (!r.ok) throw new ToolFailure(r.error);
@@ -272,29 +316,31 @@ export class ToolExecutor {
       case "navigate": {
         const tab = await this.resolveTab(conversationId, args.tabId);
         const raw = String(args.url || "").trim();
-        await this.approve(conversationId, "navigate", `Go to ${raw}`, genericActionNeedsApproval(mode, "navigate"), hostOf(tab.url));
+        await this.approve(conversationId, "navigate", `Go to ${raw}`, this.guard(genericActionNeedsApproval(mode, "navigate"), !["back", "forward", "reload"].includes(raw)), hostOf(tab.url));
         if (["back", "forward", "reload"].includes(raw)) {
           if (raw === "reload") await browser.tabs.reload(tab.id);
           else if (raw === "back" && browser.tabs.goBack) await browser.tabs.goBack(tab.id);
           else if (raw === "forward" && browser.tabs.goForward) await browser.tabs.goForward(tab.id);
           else await this.sendToTab(tab, { kind: "history", action: raw });
         } else {
+          this.host.beforeNavigation();
           const url = validateNavigationUrl(raw);
           await browser.tabs.update(tab.id, { url });
         }
         const loaded = await this.waitForLoad(tab.id);
-        this.host.setIndicator(tab.id, true);
+        this.indicator(conversationId, tab.id, true);
         return { result: text(`Loaded: ${loaded.title || "(untitled)"} — ${loaded.url || "(url unavailable: no access to this site)"}`), summary: `Navigated to ${hostOf(loaded.url) || raw}` };
       }
       case "open_tab": {
         const url = validateNavigationUrl(String(args.url || ""));
         const cur = await this.resolveTab(conversationId).catch(() => null);
-        await this.approve(conversationId, "open_tab", `Open ${url} in a new tab`, genericActionNeedsApproval(mode, "open_tab"), hostOf(url));
+        await this.approve(conversationId, "open_tab", `Open ${url} in a new tab`, this.guard(genericActionNeedsApproval(mode, "open_tab"), true), hostOf(url));
+        this.host.beforeNavigation();
         const created = await browser.tabs.create({ url, active: true, ...(cur?.windowId ? { windowId: cur.windowId } : {}) });
-        if (cur) this.host.setIndicator(cur.id, false);
+        if (cur) this.indicator(conversationId, cur.id, false);
         this.host.setAgentTab(conversationId, created.id, created.windowId);
         const loaded = await this.waitForLoad(created.id);
-        this.host.setIndicator(created.id, true);
+        this.indicator(conversationId, created.id, true);
         return { result: text(`Opened tabId=${created.id}: ${loaded.title || "(untitled)"} — ${loaded.url || url}`), summary: `Opened ${hostOf(url)} in a new tab` };
       }
       case "switch_tab": {
@@ -312,9 +358,9 @@ export class ToolExecutor {
         try {
           await browser.windows.update(tab.windowId, { focused: true });
         } catch { /* ignore */ }
-        if (prev !== undefined && prev !== id) this.host.setIndicator(prev, false);
+        if (prev !== undefined && prev !== id) this.indicator(conversationId, prev, false);
         this.host.setAgentTab(conversationId, id, tab.windowId);
-        this.host.setIndicator(id, true);
+        this.indicator(conversationId, id, true);
         return { result: text(`Switched to tabId=${id}: ${tab.title || "(untitled)"} — ${tab.url || "(no access)"}`), summary: `Switched to “${(tab.title || String(id)).slice(0, 40)}”` };
       }
       case "close_tab": {
@@ -334,17 +380,16 @@ export class ToolExecutor {
         const tab = await this.resolveTab(conversationId, args.tabId);
         this.assertScriptable(tab);
         if (!tab.active) throw new ToolFailure("Screenshots can only capture the active tab of a window. Call switch_tab first.");
-        await this.sendToTab(tab, { kind: "capture_prepare" }).catch(() => {});
-        await sleep(120);
+        // The sidebar stays visible (hiding it made it flicker); it is cropped out of the image instead.
+        const geo = await this.host.panelGeometry(tab.id);
         let dataUrl: string;
         try {
           dataUrl = await browser.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 70 });
         } catch (e: any) {
           throw new ToolFailure(`Safari could not capture this tab (${e?.message || e}).`);
-        } finally {
-          await this.sendToTab(tab, { kind: "capture_restore" }).catch(() => {});
         }
-        const scaled = await downscale(dataUrl, 1280);
+        const keep = geo?.open && geo.viewportWidth > 0 ? Math.max(0.2, Math.min(1, (geo.viewportWidth - geo.reserve) / geo.viewportWidth)) : 1;
+        const scaled = await downscale(dataUrl, 1280, keep);
         const m = /^data:([^;]+);base64,(.*)$/.exec(scaled);
         if (!m) throw new ToolFailure("Screenshot capture returned no image.");
         return {
@@ -364,31 +409,38 @@ export class ToolExecutor {
   }
 }
 
-async function downscale(dataUrl: string, maxWidth: number): Promise<string> {
+async function loadImage(dataUrl: string): Promise<{ img: CanvasImageSource; width: number; height: number }> {
+  // Safari's background page has a DOM: decode with an <img> (createImageBitmap is unreliable there).
+  if (typeof Image !== "undefined") {
+    const img = new Image();
+    img.src = dataUrl;
+    await img.decode();
+    return { img, width: img.naturalWidth, height: img.naturalHeight };
+  }
+  const bmp = await createImageBitmap(await (await fetch(dataUrl)).blob());
+  return { img: bmp, width: bmp.width, height: bmp.height };
+}
+
+/** Scale down to maxWidth and keep only the left `keepFraction` (the page without the sidebar). */
+export async function downscale(dataUrl: string, maxWidth: number, keepFraction = 1): Promise<string> {
   try {
-    const blob = await (await fetch(dataUrl)).blob();
-    const bmp = await createImageBitmap(blob);
-    if (bmp.width <= maxWidth) return dataUrl;
-    const scale = maxWidth / bmp.width;
-    const w = Math.round(bmp.width * scale);
-    const h = Math.round(bmp.height * scale);
-    let canvas: any;
-    if (typeof OffscreenCanvas !== "undefined") canvas = new OffscreenCanvas(w, h);
-    else {
-      canvas = document.createElement("canvas");
-      canvas.width = w;
-      canvas.height = h;
-    }
+    const { img, width, height } = await loadImage(dataUrl);
+    const srcW = Math.max(1, Math.round(width * keepFraction));
+    if (srcW >= width && width <= maxWidth) return dataUrl;
+    const scale = Math.min(1, maxWidth / srcW);
+    const w = Math.round(srcW * scale);
+    const h = Math.round(height * scale);
+    const canvas: any = typeof document !== "undefined" ? document.createElement("canvas") : new OffscreenCanvas(w, h);
+    canvas.width = w;
+    canvas.height = h;
     const ctx = canvas.getContext("2d");
-    ctx.drawImage(bmp, 0, 0, w, h);
-    if (canvas.convertToBlob) {
-      const out: Blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.75 });
-      const buf = new Uint8Array(await out.arrayBuffer());
-      let bin = "";
-      for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
-      return "data:image/jpeg;base64," + btoa(bin);
-    }
-    return canvas.toDataURL("image/jpeg", 0.75);
+    ctx.drawImage(img, 0, 0, srcW, height, 0, 0, w, h);
+    if (canvas.toDataURL) return canvas.toDataURL("image/jpeg", 0.78);
+    const out: Blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.78 });
+    const buf = new Uint8Array(await out.arrayBuffer());
+    let bin = "";
+    for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+    return "data:image/jpeg;base64," + btoa(bin);
   } catch {
     return dataUrl;
   }

@@ -6,16 +6,23 @@ final class Run {
     let conversationId: String
     let messageId: String
     let provider: String
+    /// Safari profile whose extension instance owns this chat (where the user typed it).
+    let profileId: String
+    /// Browser access: "tab" | "window" | "all" (all authorized windows and profiles).
+    var tabScope = "tab"
+    /// Approval mode chosen in the panel: "sensitive" | "always" | "never".
+    var approvalMode = "sensitive"
     var cancelled = false
     var finished = false
     var cancelHandler: (() -> Void)?
     var toolSeq = 0
     var pendingToolCalls: Set<String> = []
 
-    init(conversationId: String, messageId: String, provider: String) {
+    init(conversationId: String, messageId: String, provider: String, profileId: String) {
         self.conversationId = conversationId
         self.messageId = messageId
         self.provider = provider
+        self.profileId = profileId
     }
 }
 
@@ -39,12 +46,13 @@ final class TurnSink {
     }
 }
 
-/// Result of a browser tool call, as returned by the extension.
+/// Result of a tool call.
 struct ToolOutcome {
     var content: [JSONObject]   // [{type:"text",text} | {type:"image",data,mediaType}]
     var isError: Bool
 
     static func error(_ msg: String) -> ToolOutcome { ToolOutcome(content: [["type": "text", "text": msg]], isError: true) }
+    static func ok(_ msg: String) -> ToolOutcome { ToolOutcome(content: [["type": "text", "text": msg]], isError: false) }
     var text: String { content.compactMap { $0["text"] as? String }.joined(separator: "\n") }
 }
 
@@ -53,6 +61,24 @@ protocol Provider: AnyObject {
     func status(refresh: Bool, completion: @escaping (JSONObject) -> Void)
     func startTurn(conversation: Conversation, userText: String, model: String?, effort: String?, sink: TurnSink)
     func forget(conversationId: String)
+}
+
+/// One connected Safari extension instance. Safari runs a separate instance of
+/// the extension in every profile, each with its own tabs, windows and storage.
+final class ExtensionInstance {
+    let client: WSClient
+    let profileId: String
+    let version: String
+    let connectedAt = Date()
+    var lastActive = Date()
+    /// Last time one of this profile's windows was focused (for "most recently used").
+    var lastFocused: Date?
+
+    init(client: WSClient, profileId: String, version: String) {
+        self.client = client
+        self.profileId = profileId
+        self.version = version
+    }
 }
 
 final class Hub {
@@ -64,25 +90,31 @@ final class Hub {
     private(set) var port: UInt16 = 0
 
     private var clients = Set<WSClient>()
-    private weak var extensionClient: WSClient?
-    /// Tool catalog: provided by the connected extension, with a bundled copy as fallback.
-    private(set) var currentTools: [JSONObject] = {
+    /// Connected extension instances by Safari profile id.
+    private(set) var instances: [String: ExtensionInstance] = [:]
+    /// Recent connect/disconnect events (diagnostics only; no page data).
+    private(set) var connectionLog: [String] = []
+    /// Browser tool catalog: provided by the extension, with a bundled copy as fallback.
+    private(set) var browserTools: [JSONObject] = {
         guard let url = Bundle.main.url(forResource: "tools", withExtension: "json"),
               let d = try? Data(contentsOf: url), let arr = JSON.parseAny(d) as? [JSONObject] else { return [] }
         return arr
     }()
     private var bridgeTokens: [String: String] = [:]          // bridge token -> conversation id
-    private var pendingTools: [String: (callId: String, run: Run, toolId: String, completion: (ToolOutcome) -> Void)] = [:]
+    private var pendingTools: [String: (run: Run, toolId: String, client: WSClient?, emit: Bool, completion: (ToolOutcome) -> Void)] = [:]
+    private var pendingCalls: [String: (client: WSClient, completion: (Result<Any, AgentError>) -> Void)] = [:]
     private var runs: [String: Run] = [:]
+    /// Per conversation: has it read web content / local data? Used for approval safeguards.
+    private var taint: [String: (web: Bool, local: Bool)] = [:]
 
     var claude: ClaudeProvider!
     var chatgpt: ChatGPTProvider!
     private var providers: [Provider] { [claude, chatgpt] }
 
-    /// Observed by the status window.
+    /// Observed by the status UI (called on the main thread).
     var onStatusChange: (() -> Void)?
-    private(set) var extensionConnected = false
     private(set) var lastProviderStatus: [JSONObject] = []
+    var extensionConnected: Bool { !instances.isEmpty }
 
     private init() {
         server = WebSocketServer(queue: queue)
@@ -107,6 +139,7 @@ final class Hub {
             }
             self.notifyStatus()
         }
+        SettingsStore.shared.onChange = { [weak self] old, new in self?.settingsChanged(old, new) }
         queue.async { self.refreshProviders(refresh: true) }
     }
 
@@ -119,17 +152,23 @@ final class Hub {
     }
 
     private func writeConnectionFile() {
-        let info: JSONObject = ["port": Int(port), "token": token, "pid": Int(getpid()), "version": 1]
+        let info: JSONObject = ["port": Int(port), "token": token, "pid": Int(getpid()), "version": 2]
         do { try Paths.writePrivate(JSON.data(info), to: Paths.connectionFile) }
         catch { Log.helper.error("could not write connection file") }
     }
 
-    private func notifyStatus() {
-        let ext = extensionClient != nil
+    func notifyStatus() {
+        let connected = Set(instances.keys)
         DispatchQueue.main.async {
-            self.extensionConnected = ext
+            ProfileRegistry.shared.setConnected(connected)
             self.onStatusChange?()
         }
+    }
+
+    private func logConnection(_ s: String) {
+        let f = ISO8601DateFormatter()
+        connectionLog.append("\(f.string(from: Date())) \(s)")
+        if connectionLog.count > 60 { connectionLog.removeFirst(connectionLog.count - 60) }
     }
 
     // MARK: clients
@@ -146,14 +185,19 @@ final class Hub {
 
     private func closed(_ c: WSClient) {
         clients.remove(c)
-        if c === extensionClient {
-            extensionClient = nil
-            // Fail tool calls that were waiting for the extension.
-            for (callId, p) in pendingTools {
+        if let profile = c.profileId, instances[profile]?.client === c {
+            instances[profile] = nil
+            logConnection("disconnect \(profile.prefix(8))")
+            // Fail tool calls and RPCs that were waiting for this instance.
+            for (callId, p) in pendingTools where p.client === c {
                 pendingTools[callId] = nil
                 p.run.pendingToolCalls.remove(callId)
-                emit(p.run, ["kind": "tool_end", "messageId": p.run.messageId, "toolId": p.toolId, "status": "error", "detail": "Safari extension disconnected"])
-                p.completion(.error("The Safari extension disconnected while running this action (the browser may have reloaded the extension). Check the page state and try again."))
+                if p.emit { emit(p.run, ["kind": "tool_end", "messageId": p.run.messageId, "toolId": p.toolId, "status": "error", "detail": "Safari extension disconnected"]) }
+                p.completion(.error("The Safari extension disconnected while running this action (Safari may have reloaded the extension). Check the page state and try again."))
+            }
+            for (id, p) in pendingCalls where p.client === c {
+                pendingCalls[id] = nil
+                p.completion(.failure(AgentError("disconnected", "Safari disconnected.")))
             }
             notifyStatus()
         }
@@ -166,11 +210,16 @@ final class Hub {
             authenticate(c, msg)
             return
         }
+        if c.role == "extension", let p = c.profileId { instances[p]?.lastActive = Date() }
         switch (c.role, type) {
         case ("extension", "tool_result"), ("driver", "tool_result"):
             toolResult(msg)
-        case ("extension", "debug_probe_result"):
-            if let id = msg["id"] as? String, let r = probeReplies.removeValue(forKey: id) { r(msg["result"] ?? NSNull()) }
+        case ("extension", "call_result"):
+            guard let id = msg["id"] as? String, let p = pendingCalls.removeValue(forKey: id) else { return }
+            if let e = msg["error"] as? String { p.completion(.failure(AgentError("call_failed", e))) }
+            else { p.completion(.success(msg["result"] ?? NSNull())) }
+        case ("extension", "event"):
+            instanceEvent(c, msg)
         case ("extension", "approval_pending"):
             // Mirror approval prompts to local test drivers (they can answer via approval.respond).
             for d in clients where d.role == "driver" { d.send(msg) }
@@ -178,14 +227,14 @@ final class Hub {
             let id = msg["id"] as? String ?? ""
             let method = msg["method"] as? String ?? ""
             let params = msg["params"] as? JSONObject ?? [:]
-            handleRequest(method, params) { result in
+            handleRequest(method, params, from: c) { result in
                 switch result {
                 case .success(let v): c.send(["type": "res", "id": id, "result": v])
                 case .failure(let e): c.send(["type": "res", "id": id, "error": ["message": e.message, "code": e.code]])
                 }
             }
         case ("mcp", "tools_list"):
-            c.send(["type": "tools", "id": msg["id"] ?? "", "tools": currentTools])
+            c.send(["type": "tools", "id": msg["id"] ?? "", "tools": toolsFor(conversationId: c.conversationId)])
         case ("mcp", "tool_call"):
             bridgeToolCall(c, msg)
         default:
@@ -203,54 +252,152 @@ final class Hub {
             }
             c.role = role
             if role == "extension" {
-                if let old = extensionClient, old !== c { old.close() }
-                extensionClient = c
-                if let t = msg["tools"] as? [JSONObject], !t.isEmpty { currentTools = t }
+                let profile = sanitizeProfileId(msg["profile"] as? String)
+                c.profileId = profile
+                // One connection per profile: a reconnect of the same instance replaces the old one,
+                // but instances of different profiles never displace each other.
+                if let old = instances[profile], old.client !== c { old.client.close() }
+                instances[profile] = ExtensionInstance(client: c, profileId: profile, version: msg["version"] as? String ?? "")
+                if let t = msg["tools"] as? [JSONObject], !t.isEmpty { browserTools = t }
+                logConnection("connect \(profile.prefix(8))")
+                c.send(["type": "welcome", "version": 2, "profileId": profile])
+                DispatchQueue.main.async { ProfileRegistry.shared.instanceConnected(profile) }
+                queue.asyncAfter(deadline: .now() + 0.05) { self.pushConfig(to: profile) }
+                SessionSharing.shared.instanceConnected(profile)
                 notifyStatus()
+            } else {
+                c.send(["type": "welcome", "version": 2])
             }
-            c.send(["type": "welcome", "version": 1])
         case "mcp":
             guard let conv = bridgeTokens.first(where: { constantTimeEqual($0.key, presented) })?.value else {
                 c.send(["type": "rejected", "reason": "Invalid bridge token."]); c.close(); return
             }
             c.role = "mcp"
             c.conversationId = conv
-            c.send(["type": "welcome", "version": 1])
+            c.send(["type": "welcome", "version": 2])
         default:
             c.send(["type": "rejected", "reason": "Unknown role."]); c.close()
         }
     }
 
-    private func broadcast(_ msg: JSONObject) {
-        for c in clients where c.role == "extension" || c.role == "driver" { c.send(msg) }
+    private func sanitizeProfileId(_ s: String?) -> String {
+        let v = (s ?? "default").trimmingCharacters(in: .whitespaces)
+        let ok = !v.isEmpty && v.count <= 64 && v.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+        return ok ? v : "default"
+    }
+
+    /// The instance used when no profile is specified (debug driver, status): most recently active.
+    var primaryInstance: ExtensionInstance? { instances.values.max { $0.lastActive < $1.lastActive } }
+
+    func instance(_ profileId: String?) -> ExtensionInstance? {
+        if let p = profileId, let i = instances[p] { return i }
+        return nil
+    }
+
+    private func drivers() -> [WSClient] { clients.filter { $0.role == "driver" } }
+
+    /// Send to every extension instance (and drivers).
+    func broadcastAll(_ msg: JSONObject) {
+        for i in instances.values { i.client.send(msg) }
+        for d in drivers() { d.send(msg) }
+    }
+
+    private func sendConversations() {
+        for i in instances.values {
+            i.client.send(["type": "conversations", "conversations": conversationList(for: i.profileId)])
+        }
+    }
+
+    private func conversationList(for profile: String?) -> [JSONObject] {
+        store.list().filter { profile == nil || $0.profileId == nil || $0.profileId == profile }.map { $0.summaryJSON() }
+    }
+
+    /// Request/response call into one extension instance (e.g. open a URL in that profile).
+    func callInstance(_ profileId: String, _ method: String, _ params: JSONObject = [:], timeout: Double = 10, completion: @escaping (Result<Any, AgentError>) -> Void) {
+        guard let inst = instances[profileId] else {
+            return completion(.failure(AgentError("not_connected", "Orbit isn't connected to this Safari profile right now.")))
+        }
+        let id = UUID().uuidString
+        pendingCalls[id] = (inst.client, completion)
+        inst.client.send(["type": "call", "id": id, "method": method, "params": params])
+        queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            if let p = self?.pendingCalls.removeValue(forKey: id) { p.completion(.failure(AgentError("timeout", "Safari did not respond in time."))) }
+        }
+    }
+
+    func callInstance(_ profileId: String, _ method: String, _ params: JSONObject = [:], timeout: Double = 10) async -> Result<Any, AgentError> {
+        await withCheckedContinuation { cont in
+            queue.async { self.callInstance(profileId, method, params, timeout: timeout) { cont.resume(returning: $0) } }
+        }
+    }
+
+    // MARK: configuration pushed to the extension instances
+
+    func pushConfig(to profile: String? = nil) {
+        let s = SettingsStore.shared.current
+        for i in instances.values where profile == nil || i.profileId == profile {
+            i.client.send(["type": "config", "config": s.extensionConfig(for: i.profileId)])
+        }
+    }
+
+    private func settingsChanged(_ old: AppSettings, _ new: AppSettings) {
+        if old.routing != new.routing || old.sharing != new.sharing || old.profiles != new.profiles || old.agent.computerAccess != new.agent.computerAccess {
+            pushConfig()
+        }
+        if old.sharing != new.sharing { SessionSharing.shared.settingsChanged(old.sharing, new.sharing) }
+    }
+
+    // MARK: events from extension instances
+
+    private func instanceEvent(_ c: WSClient, _ msg: JSONObject) {
+        guard let profile = c.profileId else { return }
+        let name = msg["name"] as? String ?? ""
+        let data = msg["data"] as? JSONObject ?? [:]
+        switch name {
+        case "window_focused":
+            instances[profile]?.lastFocused = Date()
+            DispatchQueue.main.async { ProfileRegistry.shared.profileFocused(profile) }
+        case "window_created":
+            DispatchQueue.main.async { ProfileRegistry.shared.windowCreated(profile) }
+        case "cookies_changed":
+            SessionSharing.shared.cookiesChanged(profile: profile, domain: data["domain"] as? String ?? "")
+        default:
+            break
+        }
     }
 
     // MARK: requests
 
     typealias Reply = (Result<Any, AgentError>) -> Void
 
-    private func handleRequest(_ method: String, _ p: JSONObject, reply: @escaping Reply) {
+    private func handleRequest(_ method: String, _ p: JSONObject, from c: WSClient, reply: @escaping Reply) {
+        let profile = c.role == "extension" ? c.profileId : (p["profile"] as? String)
+        if method.hasPrefix("route.") { return Router.shared.handle(method, p, profile: profile, reply: reply) }
+        if method.hasPrefix("sessions.") { return SessionSharing.shared.handle(method, p, profile: profile, reply: reply) }
         switch method {
         case "providers.list":
             refreshProviders(refresh: p["refresh"] as? Bool ?? false) { reply(.success($0)) }
         case "conversations.list":
-            reply(.success(store.list().map { $0.summaryJSON() }))
+            reply(.success(conversationList(for: profile)))
         case "conversations.get":
-            guard let id = p["id"] as? String, let c = store.get(id) else { return reply(.failure(AgentError("not_found", "Conversation not found."))) }
-            reply(.success(c.json()))
+            guard let id = p["id"] as? String, let conv = store.get(id) else { return reply(.failure(AgentError("not_found", "Conversation not found."))) }
+            reply(.success(conv.json()))
         case "conversations.delete":
             guard let id = p["id"] as? String else { return reply(.failure(AgentError("bad_request", "Missing id."))) }
             if let r = runs[id] { cancel(r) }
             providers.forEach { $0.forget(conversationId: id) }
             store.delete(id)
+            taint[id] = nil
             reply(.success(["ok": true]))
+            sendConversations()
         case "chat.send":
-            chatSend(p, reply: reply)
+            chatSend(p, profile: profile ?? "default", reply: reply)
         case "chat.cancel":
             if let id = p["conversationId"] as? String, let r = runs[id] { cancel(r) }
             reply(.success(["ok": true]))
         case "chat.running":
-            reply(.success(["conversationId": runs.keys.first as Any]))
+            let r = runs.values.first { profile == nil || $0.profileId == profile }
+            reply(.success(["conversationId": r?.conversationId as Any]))
         case "chatgpt.signin":
             chatgpt.signIn { [weak self] result in
                 self?.queue.async {
@@ -269,39 +416,97 @@ final class Hub {
             ClaudeCLI.openLoginInTerminal()
             reply(.success(["ok": true]))
         case "approval.respond":
-            extensionClient?.send(["type": "approval_response", "id": p["id"] ?? "", "allow": p["allow"] as? Bool ?? false])
+            // Test driver answering an approval shown in a panel.
+            for i in instances.values { i.client.send(["type": "approval_response", "id": p["id"] ?? "", "allow": p["allow"] as? Bool ?? false]) }
             reply(.success(["ok": true]))
-        case "debug.panel":
-            guard let ext = extensionClient else { return reply(.failure(AgentError("no_extension", "Extension not connected."))) }
-            ext.send(["type": "panel", "open": p["open"] as? Bool ?? true])
-            reply(.success(["ok": true]))
-        case "debug.panel_send":
-            // Test driver: submit a message through the extension's panel send path.
-            guard let ext = extensionClient else { return reply(.failure(AgentError("no_extension", "Extension not connected."))) }
-            ext.send(["type": "debug_send", "text": p["text"] as? String ?? ""])
-            reply(.success(["ok": true]))
-        case "debug.probe":
-            guard let ext = extensionClient else { return reply(.failure(AgentError("no_extension", "Extension not connected."))) }
-            let pid = UUID().uuidString
-            probeReplies[pid] = { r in reply(.success(r)) }
-            ext.send(["type": "debug_probe", "id": pid, "tabId": p["tabId"] ?? NSNull()])
-            queue.asyncAfter(deadline: .now() + 15) { [weak self] in
-                if let r = self?.probeReplies.removeValue(forKey: pid) { r(["error": "timeout"]) }
+        case "approval.relay":
+            // An instance acting in another profile asks the chat's own panel for approval.
+            guard let owner = p["ownerProfile"] as? String else { return reply(.failure(AgentError("bad_request", "Missing owner."))) }
+            requestApproval(profileId: owner, conversationId: p["conversationId"] as? String ?? "", tool: p["tool"] as? String ?? "", summary: p["summary"] as? String ?? "", reason: p["reason"] as? String ?? "") { ok in
+                reply(.success(["allow": ok]))
             }
-        case "debug.settings":
-            guard let ext = extensionClient else { return reply(.failure(AgentError("no_extension", "Extension not connected."))) }
-            ext.send(["type": "debug_settings", "settings": p["settings"] ?? [:], "newConversation": p["newConversation"] as? Bool ?? false])
+        case "profiles.list":
+            let s = SettingsStore.shared.current
+            reply(.success(["profileId": profile as Any, "profiles": s.orderedProfiles.map { ["id": $0.id, "name": $0.name, "symbol": $0.symbol, "color": $0.color, "connected": instances[$0.id] != nil] }]))
+        case "settings.agent":
+            let a = SettingsStore.shared.current.agent
+            reply(.success(["computerAccess": a.computerAccess, "folders": a.folders, "allowCommands": a.allowCommands]))
+        case "settings.update_agent":
+            SettingsStore.shared.update { s in
+                if let v = p["computerAccess"] as? String, ["none", "folders", "full"].contains(v) { s.agent.computerAccess = v }
+                if let v = p["allowCommands"] as? Bool { s.agent.allowCommands = v }
+                if let rm = p["removeFolder"] as? String { s.agent.folders.removeAll { $0 == rm } }
+            }
+            let a = SettingsStore.shared.current.agent
+            reply(.success(["computerAccess": a.computerAccess, "folders": a.folders, "allowCommands": a.allowCommands]))
+        case "folders.choose":
+            DispatchQueue.main.async {
+                let chosen = FolderPicker.choose()
+                if !chosen.isEmpty { SettingsStore.shared.update { s in for f in chosen where !s.agent.folders.contains(f) { s.agent.folders.append(f) } } }
+                reply(.success(["folders": SettingsStore.shared.current.agent.folders]))
+            }
+        case "app.open_settings":
+            DispatchQueue.main.async { AppDelegate.shared?.openSettings(section: p["section"] as? String) }
             reply(.success(["ok": true]))
-        case "debug.toggle":
-            extensionClient?.send(["type": "debug_toggle"])
-            reply(.success(["ok": extensionClient != nil]))
+        // ---- test driver (local only, token protected) ----
         case "debug.state":
-            reply(.success(["extensionConnected": extensionClient != nil, "tools": currentTools.count, "running": runs.keys.first as Any]))
+            reply(.success([
+                "extensionConnected": !instances.isEmpty,
+                "instances": instances.values.map { ["profile": $0.profileId, "version": $0.version, "connectedAt": $0.connectedAt.timeIntervalSince1970, "lastActive": $0.lastActive.timeIntervalSince1970] },
+                "connectionLog": connectionLog,
+                "tools": browserTools.count,
+                "running": runs.keys.first as Any,
+            ]))
+        case "debug.agent_settings":
+            // Local test driver only: set computer access without the folder chooser.
+            guard c.role == "driver" else { return reply(.failure(AgentError("forbidden", "Not allowed."))) }
+            SettingsStore.shared.update { s in
+                if let v = p["computerAccess"] as? String { s.agent.computerAccess = v }
+                if let f = p["folders"] as? [String] { s.agent.folders = f }
+                if let v = p["allowCommands"] as? Bool { s.agent.allowCommands = v }
+            }
+            reply(.success(["ok": true]))
+        case "debug.focus_profile", "debug.safari_profiles":
+            // Local test driver only.
+            guard c.role == "driver" else { return reply(.failure(AgentError("forbidden", "Not allowed."))) }
+            if method == "debug.safari_profiles" {
+                DispatchQueue.main.async {
+                    ProfileRegistry.shared.syncFromSafari()
+                    let s = SettingsStore.shared.current
+                    let front = SafariAX.windowProfiles().first?.name
+                    reply(.success(["front": front as Any, "colorSource": ProfileRegistry.shared.colorSource,
+                                    "profiles": s.listedProfiles.map { ["id": String($0.id.prefix(12)), "name": $0.name, "symbol": $0.symbol, "color": $0.color, "default": $0.isSafariDefault as Any] }]))
+                }
+                return
+            }
+            let id = p["profileId"] as? String ?? ""
+            Task {
+                let r = await SafariController.focus(profileId: id)
+                let front = await MainActor.run { SafariAX.windowProfiles().first?.name }
+                if case .fallback(let why) = r { reply(.success(["ok": false, "why": why, "front": front as Any])) } else { reply(.success(["ok": true, "front": front as Any])) }
+            }
+        case "debug.call":
+            // Test driver: call an extension instance method (e.g. "caps", "windows").
+            guard let inst = instance(p["profile"] as? String) ?? primaryInstance else { return reply(.failure(AgentError("no_extension", "Extension not connected."))) }
+            callInstance(inst.profileId, p["method"] as? String ?? "", p["params"] as? JSONObject ?? [:], timeout: p["timeout"] as? Double ?? 15) { r in
+                switch r { case .success(let v): reply(.success(v)); case .failure(let e): reply(.failure(e)) }
+            }
+        case "debug.panel", "debug.panel_send", "debug.probe", "debug.settings", "debug.toggle":
+            guard let inst = instance(p["profile"] as? String) ?? primaryInstance else { return reply(.failure(AgentError("no_extension", "Extension not connected."))) }
+            let m: [String: String] = ["debug.panel": "panel", "debug.panel_send": "debug_send", "debug.probe": "debug_probe", "debug.settings": "debug_settings", "debug.toggle": "debug_toggle"]
+            var params = p
+            params["profile"] = nil
+            callInstance(inst.profileId, m[method]!, params, timeout: 15) { r in
+                switch r { case .success(let v): reply(.success(v)); case .failure(let e): reply(.failure(e)) }
+            }
         case "debug.tool":
             // Test driver: run a browser tool directly (no AI), e.g. to verify page state.
             guard let name = p["name"] as? String else { return reply(.failure(AgentError("bad_request", "Missing name."))) }
-            let run = Run(conversationId: "debug-\(UUID().uuidString.prefix(8))", messageId: "debug", provider: "debug")
+            let target = (instance(p["profile"] as? String) ?? primaryInstance)?.profileId ?? "default"
+            let run = Run(conversationId: "debug-\(UUID().uuidString.prefix(8))", messageId: "debug", provider: "debug", profileId: target)
             run.finished = true
+            run.tabScope = "all"
+            run.approvalMode = p["approvalMode"] as? String ?? "never"
             executeTool(run: run, name: name, args: p["args"] as? JSONObject ?? [:], emitEvents: false) { out in
                 self.queue.async { reply(.success(["isError": out.isError, "content": out.content])) }
             }
@@ -311,6 +516,16 @@ final class Hub {
     }
 
     func refreshProviders(refresh: Bool, completion: (([JSONObject]) -> Void)? = nil) {
+        // Answer immediately from the last known status; refresh in the background.
+        if !refresh, !lastProviderStatus.isEmpty, !lastProviderStatus.contains(where: { $0["state"] as? String == "checking" }) {
+            completion?(lastProviderStatus)
+            refreshProvidersNow(refresh: false, completion: nil)
+            return
+        }
+        refreshProvidersNow(refresh: refresh, completion: completion)
+    }
+
+    private func refreshProvidersNow(refresh: Bool, completion: (([JSONObject]) -> Void)?) {
         let group = DispatchGroup()
         var results: [String: JSONObject] = [:]
         let lock = NSLock()
@@ -333,7 +548,7 @@ final class Hub {
             let changed = JSON.string(list) != JSON.string(self.lastProviderStatus)
             self.lastProviderStatus = list
             completion?(list)
-            if changed { self.broadcast(["type": "providers", "providers": list]) }
+            if changed { self.broadcastAll(["type": "providers", "providers": list]) }
             DispatchQueue.main.async { self.onStatusChange?() }
         }
         group.notify(queue: queue) { deliver() }
@@ -351,14 +566,16 @@ final class Hub {
         lock.unlock()
         guard list.count == 2, JSON.string(list) != JSON.string(lastProviderStatus) else { return }
         lastProviderStatus = list
-        broadcast(["type": "providers", "providers": list])
+        broadcastAll(["type": "providers", "providers": list])
         DispatchQueue.main.async { self.onStatusChange?() }
     }
 
     private func provider(_ id: String) -> Provider? { providers.first { $0.id == id } }
 
-    private func chatSend(_ p: JSONObject, reply: @escaping Reply) {
-        guard runs.isEmpty else { return reply(.failure(AgentError("busy", "A task is already running. Stop it before sending a new message."))) }
+    private func chatSend(_ p: JSONObject, profile: String, reply: @escaping Reply) {
+        guard !runs.values.contains(where: { $0.profileId == profile }) else {
+            return reply(.failure(AgentError("busy", "A task is already running. Stop it before sending a new message.")))
+        }
         let text = (p["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return reply(.failure(AgentError("bad_request", "Empty message."))) }
         guard text.count <= 100_000 else { return reply(.failure(AgentError("bad_request", "Message is too long."))) }
@@ -373,24 +590,38 @@ final class Hub {
         if let id = p["conversationId"] as? String, let existing = store.get(id), existing.provider == providerId {
             conv = existing
         } else {
-            conv = store.create(provider: providerId, model: model, title: String(text.prefix(60)))
+            conv = store.create(provider: providerId, model: model, title: String(text.prefix(60)), profileId: profile)
         }
         if let model { conv.model = model }
+        if conv.profileId == nil { conv.profileId = profile }
         let userId = (p["userMessageId"] as? String) ?? "u\(Int(Date().timeIntervalSince1970 * 1000))"
         conv.messages.append(UIMessage(id: userId, role: "user", blocks: [Block(type: "text", text: text)], createdAt: Date().timeIntervalSince1970 * 1000))
         conv.updatedAt = Date().timeIntervalSince1970 * 1000
         store.update(conv)
         reply(.success(["conversationId": conv.id, "title": conv.title]))
-        broadcast(["type": "conversations", "conversations": store.list().map { $0.summaryJSON() }])
+        sendConversations()
 
+        let run = Run(conversationId: conv.id, messageId: "m\(UUID().uuidString.prefix(12).lowercased())", provider: providerId, profileId: profile)
+        if let s = p["tabScope"] as? String, ["tab", "window", "all"].contains(s) { run.tabScope = s }
+        if let m = p["approvalMode"] as? String, ["sensitive", "always", "never"].contains(m) { run.approvalMode = m }
+        // Conversations that already contain browser or file tool results stay marked.
+        if taint[conv.id] == nil {
+            let names = conv.messages.flatMap { $0.blocks.compactMap { $0.type == "tool" ? $0.name : nil } }
+            taint[conv.id] = (names.contains { !NativeTools.handles($0) }, names.contains { NativeTools.readsLocalData($0) })
+        }
         // Bind the task to the tab the user was viewing when they sent it.
         if let ctx = p["context"] as? JSONObject, let tabId = ctx["tabId"] as? Int {
-            extensionClient?.send(["type": "bind_tab", "conversationId": conv.id, "tabId": tabId, "windowId": ctx["windowId"] ?? NSNull()])
+            instances[profile]?.client.send(["type": "bind_tab", "conversationId": conv.id, "tabId": tabId, "windowId": ctx["windowId"] ?? NSNull()])
         }
-        let run = Run(conversationId: conv.id, messageId: "m\(UUID().uuidString.prefix(12).lowercased())", provider: providerId)
         runs[conv.id] = run
         emit(run, ["kind": "message_start", "messageId": run.messageId])
-        let fullText = Prompts.userMessage(text: text, context: p["context"] as? JSONObject)
+        let env = Prompts.Environment(
+            profileName: SettingsStore.shared.current.profile(profile)?.name,
+            otherProfiles: run.tabScope == "all" ? SettingsStore.shared.current.orderedProfiles.filter { $0.id != profile }.map(\.name) : [],
+            tabScope: run.tabScope,
+            computerAccess: SettingsStore.shared.current.agent.computerAccess,
+            folders: SettingsStore.shared.current.agent.folders)
+        let fullText = Prompts.userMessage(text: text, context: p["context"] as? JSONObject, env: env)
         prov.startTurn(conversation: conv, userText: fullText, model: model, effort: p["effort"] as? String, sink: TurnSink(hub: self, run: run))
     }
 
@@ -402,7 +633,9 @@ final class Hub {
             conv.apply(event)
             store.update(conv, persist: event["kind"] as? String == "done" || event["kind"] as? String == "tool_end")
         }
-        broadcast(["type": "event", "conversationId": run.conversationId, "event": event])
+        let msg: JSONObject = ["type": "event", "conversationId": run.conversationId, "event": event]
+        instances[run.profileId]?.client.send(msg)
+        for d in drivers() { d.send(msg) }
     }
 
     func finishRun(_ run: Run, error: AgentError?, cancelled: Bool) {
@@ -425,6 +658,7 @@ final class Hub {
             emit(run, ["kind": "tool_end", "messageId": run.messageId, "toolId": p.toolId, "status": "error", "detail": "Cancelled"])
             p.completion(.error("The user stopped the task."))
         }
+        NativeTools.shared.cancel(conversationId: run.conversationId)
         run.cancelHandler?()
         // Safety net: if the provider does not wind down, finish anyway.
         queue.asyncAfter(deadline: .now() + 8) { [weak self] in
@@ -439,6 +673,31 @@ final class Hub {
     }
 
     func activeRun(_ conversationId: String) -> Run? { runs[conversationId] }
+
+    // MARK: approvals
+
+    /// Ask the user in the chat's own panel. Denies when no panel can ask.
+    func requestApproval(profileId: String, conversationId: String, tool: String, summary: String, reason: String, completion: @escaping (Bool) -> Void) {
+        callInstance(profileId, "approval", ["conversationId": conversationId, "tool": tool, "summary": summary, "reason": reason], timeout: 5 * 60 + 5) { r in
+            if case .success(let v) = r, let o = v as? JSONObject, o["allow"] as? Bool == true { completion(true) } else { completion(false) }
+        }
+    }
+
+    // MARK: tool catalog
+
+    /// Tools offered to the model for a conversation: browser tools plus, when the
+    /// user allowed it, local file (and command) tools.
+    func toolsFor(conversationId: String?) -> [JSONObject] {
+        browserTools + NativeTools.catalog(SettingsStore.shared.current.agent)
+    }
+
+    /// Changes when the offered tool set changes (Claude sessions restart to pick it up).
+    var toolsetKey: String {
+        let a = SettingsStore.shared.current.agent
+        return "\(a.computerAccess)-\(a.allowCommands)"
+    }
+
+    func toolCatalog(conversationId: String?) -> [JSONObject] { queue.sync { toolsFor(conversationId: conversationId) } }
 
     // MARK: MCP bridge
 
@@ -467,7 +726,8 @@ final class Hub {
 
     func executeTool(run: Run, name: String, args: JSONObject, emitEvents: Bool = true, completion: @escaping (ToolOutcome) -> Void) {
         if run.cancelled { return completion(.error("The user stopped the task.")) }
-        guard currentTools.isEmpty || currentTools.contains(where: { $0["name"] as? String == name }) else {
+        let isNative = NativeTools.handles(name)
+        guard isNative || browserTools.isEmpty || browserTools.contains(where: { $0["name"] as? String == name }) else {
             return completion(.error("Unknown tool \(name)."))
         }
         run.toolSeq += 1
@@ -475,43 +735,114 @@ final class Hub {
         if emitEvents {
             emit(run, ["kind": "tool_start", "messageId": run.messageId, "toolId": toolId, "name": name, "summary": ToolSummary.describe(name, args)])
         }
-        guard let ext = extensionClient else {
-            let msg = "The Safari extension is not connected to the helper. Ask the user to open the Safari Agent panel in Safari."
-            if emitEvents { emit(run, ["kind": "tool_end", "messageId": run.messageId, "toolId": toolId, "status": "error", "detail": "Extension not connected"]) }
-            return completion(.error(msg))
+        let finish: (ToolOutcome, String?) -> Void = { [weak self] out, detail in
+            guard let self else { return }
+            self.queue.async {
+                if emitEvents {
+                    let denied = out.isError && out.text.hasPrefix("The user denied")
+                    self.emit(run, ["kind": "tool_end", "messageId": run.messageId, "toolId": toolId, "status": denied ? "denied" : (out.isError ? "error" : "done"), "detail": detail ?? ""])
+                }
+                completion(out)
+            }
+        }
+        if isNative {
+            let ctx = NativeTools.Context(conversationId: run.conversationId, profileId: run.profileId, approvalMode: run.approvalMode,
+                                          sawWebContent: taint[run.conversationId]?.web ?? false)
+            NativeTools.shared.execute(name: name, args: args, context: ctx) { [weak self] out, detail in
+                self?.queue.async {
+                    if !out.isError, NativeTools.readsLocalData(name) { self?.markTaint(run.conversationId, local: true) }
+                    finish(out, detail)
+                }
+            }
+            return
+        }
+        // Browser tool: pick the extension instance (profile) that owns the tab.
+        var targetProfile = run.profileId
+        var toolArgs = args
+        if let requested = args["profile"] as? String, !requested.isEmpty {
+            toolArgs["profile"] = nil
+            guard let pid = ProfileRegistry.resolve(requested, in: SettingsStore.shared.current) else {
+                return finish(.error("There is no Safari profile named “\(requested)”."), nil)
+            }
+            if pid != run.profileId && run.tabScope != "all" {
+                return finish(.error("The user has not allowed access to other Safari profiles. Ask them to choose “All windows and profiles” under Browser access in the panel."), nil)
+            }
+            targetProfile = pid
+        }
+        if name == "tabs_list" && run.tabScope == "all" && args["profile"] == nil {
+            return listTabsAcrossProfiles(run: run, finish: finish)
+        }
+        guard let inst = instances[targetProfile] else {
+            let msg = targetProfile == run.profileId
+                ? "The Safari extension is not connected to Orbit. Ask the user to open the Orbit panel in Safari."
+                : "Orbit isn't connected to that Safari profile right now (it connects while one of its windows is in use)."
+            return finish(.error(msg), "Extension not connected")
         }
         let callId = UUID().uuidString
         run.pendingToolCalls.insert(callId)
-        pendingTools[callId] = (callId, run, toolId, { [weak self] out in
-            completion(out)
-            _ = self
-        })
-        ext.send(["type": "tool_call", "callId": callId, "conversationId": run.conversationId, "name": name, "args": args])
+        pendingTools[callId] = (run, toolId, inst.client, emitEvents, { out in completion(out) })
+        let guardInfo: JSONObject = ["exfil": taint[run.conversationId]?.local ?? false]
+        inst.client.send(["type": "tool_call", "callId": callId, "conversationId": run.conversationId, "name": name, "args": toolArgs,
+                          "ownerProfile": run.profileId, "scope": run.tabScope, "approvalMode": run.approvalMode, "guard": guardInfo])
+        markTaint(run.conversationId, web: true)
         // Approval prompts can take up to 5 minutes.
         queue.asyncAfter(deadline: .now() + 6 * 60) { [weak self] in
             guard let self, let p = self.pendingTools[callId] else { return }
             self.pendingTools[callId] = nil
-            if emitEvents { self.emit(run, ["kind": "tool_end", "messageId": run.messageId, "toolId": toolId, "status": "error", "detail": "Timed out"]) }
+            if p.emit { self.emit(run, ["kind": "tool_end", "messageId": run.messageId, "toolId": toolId, "status": "error", "detail": "Timed out"]) }
             p.completion(.error("The browser did not respond to this action in time."))
         }
-        _ = emitEvents
-        toolEmitFlags[callId] = emitEvents
     }
 
-    private var toolEmitFlags: [String: Bool] = [:]
-    private var probeReplies: [String: (Any) -> Void] = [:]
+    private func markTaint(_ conv: String, web: Bool = false, local: Bool = false) {
+        let t = taint[conv] ?? (false, false)
+        taint[conv] = (t.web || web, t.local || local)
+    }
+
+    private func listTabsAcrossProfiles(run: Run, finish: @escaping (ToolOutcome, String?) -> Void) {
+        let settings = SettingsStore.shared.current
+        let targets = instances.keys.sorted { a, b in
+            if a == run.profileId { return true }
+            if b == run.profileId { return false }
+            return (settings.profile(a)?.order ?? 99) < (settings.profile(b)?.order ?? 99)
+        }
+        var parts: [String: String] = [:]
+        let group = DispatchGroup()
+        for pid in targets {
+            guard let inst = instances[pid] else { continue }
+            group.enter()
+            let callId = UUID().uuidString
+            pendingTools[callId] = (run, "list", inst.client, false, { out in
+                parts[pid] = out.text
+                group.leave()
+            })
+            inst.client.send(["type": "tool_call", "callId": callId, "conversationId": run.conversationId, "name": "tabs_list", "args": [:] as JSONObject,
+                              "ownerProfile": run.profileId, "scope": "all", "approvalMode": run.approvalMode])
+            queue.asyncAfter(deadline: .now() + 10) { [weak self] in
+                if let p = self?.pendingTools.removeValue(forKey: callId) { p.completion(.error("(no answer)")) }
+            }
+        }
+        markTaint(run.conversationId, web: true)
+        group.notify(queue: queue) {
+            let text = targets.map { pid -> String in
+                let name = settings.profile(pid)?.name ?? "Profile"
+                return "## Safari profile “\(name)”\(pid == run.profileId ? " (this chat's profile)" : "") — pass profile=\"\(name)\" to use these tabs\n\(parts[pid] ?? "(no answer)")"
+            }.joined(separator: "\n\n")
+            let missing = settings.orderedProfiles.filter { self.instances[$0.id] == nil }.map(\.name)
+            finish(.ok(text + (missing.isEmpty ? "" : "\n\n(Not connected right now: \(missing.joined(separator: ", ")).)")), "Listed tabs in \(targets.count) profiles")
+        }
+    }
 
     private func toolResult(_ msg: JSONObject) {
         guard let callId = msg["callId"] as? String, let p = pendingTools[callId] else { return }
         pendingTools[callId] = nil
         p.run.pendingToolCalls.remove(callId)
-        let emitEvents = toolEmitFlags.removeValue(forKey: callId) ?? true
         let r = msg["result"] as? JSONObject ?? [:]
         let content = (r["content"] as? [JSONObject]) ?? [["type": "text", "text": "(no result)"]]
         let isError = r["isError"] as? Bool ?? false
         let out = ToolOutcome(content: content, isError: isError)
         let summary = msg["summary"] as? String
-        if emitEvents {
+        if p.emit {
             let denied = isError && out.text.hasPrefix("The user denied")
             emit(p.run, ["kind": "tool_end", "messageId": p.run.messageId, "toolId": p.toolId, "status": denied ? "denied" : (isError ? "error" : "done"), "detail": summary ?? ""])
         }
@@ -522,10 +853,11 @@ final class Hub {
 enum ToolSummary {
     static func describe(_ name: String, _ a: JSONObject) -> String {
         func s(_ k: String) -> String { (a[k] as? String).map { String($0.prefix(80)) } ?? "" }
+        let inProfile = s("profile").isEmpty ? "" : " in \(s("profile"))"
         switch name {
         case "tabs_list": return "Listing tabs"
-        case "read_page": return "Reading page structure"
-        case "get_page_text": return "Reading page text"
+        case "read_page": return "Reading page structure\(inProfile)"
+        case "get_page_text": return "Reading page text\(inProfile)"
         case "find": return "Finding “\(s("query"))”"
         case "get_selection": return "Reading selection"
         case "click": return "Clicking"
@@ -534,12 +866,12 @@ enum ToolSummary {
         case "press_key": return "Pressing \(s("key"))"
         case "scroll": return "Scrolling \(s("direction"))"
         case "navigate": return "Opening \(s("url"))"
-        case "open_tab": return "Opening new tab \(s("url"))"
-        case "switch_tab": return "Switching tab"
+        case "open_tab": return "Opening new tab \(s("url"))\(inProfile)"
+        case "switch_tab": return "Switching tab\(inProfile)"
         case "close_tab": return "Closing tab"
         case "screenshot": return "Taking screenshot"
         case "wait": return "Waiting"
-        default: return name
+        default: return NativeTools.describe(name, a) ?? name
         }
     }
 }

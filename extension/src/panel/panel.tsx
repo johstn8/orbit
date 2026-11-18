@@ -1,18 +1,26 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { ApprovalMode, Block, PanelState, PanelToBackground, ProviderId, ProviderStatus, TabScope, UIMessage } from "../shared/protocol";
+import type { ApprovalMode, Block, ComputerAccess, PanelState, PanelToBackground, ProviderId, ProviderStatus, TabPanelState, TabScope, UIMessage } from "../shared/protocol";
 import { renderMarkdown } from "./markdown";
 import "./panel.css";
 
 declare const browser: any;
 
-const mode = new URLSearchParams(location.search).get("mode") || "native";
+const params = new URLSearchParams(location.search);
+const mode = params.get("mode") || "native";
+const openedByUser = params.get("focus") === "1";
 document.documentElement.dataset.mode = mode;
 
 // ---------- port to background ----------
 
 let port: any = null;
 const listeners = new Set<(s: PanelState) => void>();
+// The first state can arrive before React has mounted and subscribed. It used to
+// be dropped, leaving the panel on its spinner until the next 20 s ping.
+let lastState: PanelState | null = null;
+// Draft and focus handed over from the panel of the previous page in this tab.
+let tabHandover: TabPanelState | null = null;
+const handoverListeners = new Set<(t: TabPanelState) => void>();
 function connect() {
   try {
     port = browser.runtime.connect({ name: "panel" });
@@ -20,7 +28,13 @@ function connect() {
     return; // extension context gone (reloaded); the page will re-inject a fresh panel
   }
   port.onMessage.addListener((m: any) => {
-    if (m?.type === "state") for (const l of listeners) l(m.state);
+    if (m?.type !== "state") return;
+    if (m.tab && !tabHandover) {
+      tabHandover = m.tab;
+      for (const l of handoverListeners) l(m.tab);
+    }
+    lastState = m.state;
+    for (const l of listeners) l(m.state);
   });
   port.onDisconnect.addListener(() => setTimeout(connect, 300));
   port.postMessage({ type: "init" });
@@ -34,6 +48,8 @@ function send(msg: PanelToBackground) {
   }
 }
 connect();
+window.addEventListener("focus", () => send({ type: "focus_state", focused: true }));
+window.addEventListener("blur", () => send({ type: "focus_state", focused: false }));
 // Keep the non-persistent background alive while the panel is open.
 setInterval(() => { try { port.postMessage({ type: "init" }); } catch { /* reconnecting */ } }, 20000);
 
@@ -198,7 +214,12 @@ function ToolGroup({ steps, live }: { steps: ToolBlock[]; live: boolean }) {
   );
 }
 
-function AssistantMessage({ m, live }: { m: UIMessage; live: boolean }) {
+// Messages re-render only when their own content changed (state arrives ~20×/s while streaming).
+const msgKey = (m: UIMessage) => m.blocks.map((b) => (b.type === "text" ? `t${b.text.length}` : b.type === "tool" ? `${b.id}${b.status}${b.detail || ""}` : `${b.type}${(b as any).text?.length}`)).join("|");
+const AssistantMessage = memo(AssistantMessageView, (a, b) => a.live === b.live && a.m.id === b.m.id && msgKey(a.m) === msgKey(b.m));
+const UserMessage = memo(UserMessageView, (a, b) => a.m.id === b.m.id);
+
+function AssistantMessageView({ m, live }: { m: UIMessage; live: boolean }) {
   // Group consecutive tool steps.
   const parts: ({ kind: "tools"; steps: ToolBlock[] } | { kind: "block"; b: Block })[] = [];
   for (const b of m.blocks) {
@@ -227,7 +248,7 @@ function AssistantMessage({ m, live }: { m: UIMessage; live: boolean }) {
   );
 }
 
-function UserMessage({ m }: { m: UIMessage }) {
+function UserMessageView({ m }: { m: UIMessage }) {
   const t = m.blocks.map((b) => (b.type === "text" ? b.text : "")).join("");
   return <div className="msg user"><div className="bubble">{t}</div></div>;
 }
@@ -342,7 +363,16 @@ function ModelPicker({ s }: { s: PanelState }) {
 const SCOPES: { id: TabScope; title: string; sub: string }[] = [
   { id: "tab", title: "This tab only", sub: "Plus tabs the agent opens itself. Your other tabs stay private." },
   { id: "window", title: "All tabs in this window", sub: "Lets it list, read and switch to your other tabs, e.g. to compare them." },
+  { id: "all", title: "All windows and profiles", sub: "Every Safari window, including your other profiles (when they're open)." },
 ];
+
+const COMPUTER: { id: ComputerAccess; title: string; sub: string }[] = [
+  { id: "none", title: "No computer access", sub: "The agent only uses the browser." },
+  { id: "folders", title: "Selected folders", sub: "Read and change files in folders you choose." },
+  { id: "full", title: "Broader access", sub: "Files in your home folder; changes and commands ask first." },
+];
+
+const SCOPE_SHORT: Record<TabScope, string> = { tab: "", window: " · all tabs", all: " · all profiles" };
 
 const APPROVAL_LABEL: Record<ApprovalMode, string> = { sensitive: "Ask for sensitive", always: "Ask every time", never: "Approve for me" };
 
@@ -357,7 +387,7 @@ function ApprovalPill({ s }: { s: PanelState }) {
   return (
     <div className="picker" ref={ref}>
       <button className={`pill ${s.settings.approvalMode === "never" ? "warn" : ""}`} onClick={() => setOpen(!open)} title="When to ask before acting">
-        {I.shield}<span>{APPROVAL_LABEL[s.settings.approvalMode]}{s.settings.tabScope === "window" ? " · all tabs" : ""}</span>
+        {I.shield}<span>{APPROVAL_LABEL[s.settings.approvalMode]}{SCOPE_SHORT[s.settings.tabScope] || ""}{s.agent.computerAccess !== "none" ? " · files" : ""}</span>
       </button>
       {open && (
         <div className="menu left" role="menu">
@@ -370,7 +400,7 @@ function ApprovalPill({ s }: { s: PanelState }) {
             </button>
           ))}
           <div className="menu-sep" />
-          <div className="menu-label">Tab access</div>
+          <div className="menu-label">Browser access</div>
           {SCOPES.map((m) => (
             <button key={m.id} role="menuitemradio" aria-checked={s.settings.tabScope === m.id} className="menu-item"
               onClick={() => { send({ type: "settings", settings: { tabScope: m.id } }); setOpen(false); }}>
@@ -378,6 +408,24 @@ function ApprovalPill({ s }: { s: PanelState }) {
               {s.settings.tabScope === m.id && <span className="mi-check">{I.check}</span>}
             </button>
           ))}
+          <div className="menu-sep" />
+          <div className="menu-label">Computer access</div>
+          {COMPUTER.map((m) => (
+            <button key={m.id} role="menuitemradio" aria-checked={s.agent.computerAccess === m.id} className="menu-item"
+              onClick={() => {
+                send({ type: "set_computer_access", access: m.id });
+                if (m.id === "folders" && !s.agent.folders.length) send({ type: "choose_folders" });
+                setOpen(false);
+              }}>
+              <span className="mi-text"><span className="mi-title">{m.title}</span><span className="mi-sub">{m.id === "folders" && s.agent.folders.length ? s.agent.folders.map(shortPath).join(", ") : m.sub}</span></span>
+              {s.agent.computerAccess === m.id && <span className="mi-check">{I.check}</span>}
+            </button>
+          ))}
+          {s.agent.computerAccess === "folders" && (
+            <button className="menu-item compact" onClick={() => { send({ type: "choose_folders" }); setOpen(false); }}>
+              <span className="mi-text"><span className="mi-title">Choose Folders…</span></span>
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -387,9 +435,10 @@ function ApprovalPill({ s }: { s: PanelState }) {
 // ---------- composer ----------
 
 function Composer({ s }: { s: PanelState }) {
-  const [text, setText] = useState("");
+  const [text, setText] = useState(tabHandover?.draft || "");
   const [withSel, setWithSel] = useState(false); // only highlighted text, off by default
   const ta = useRef<HTMLTextAreaElement>(null);
+  const draftTimer = useRef<any>(null);
   const p = currentProvider(s);
   useLayoutEffect(() => {
     const el = ta.current;
@@ -397,35 +446,46 @@ function Composer({ s }: { s: PanelState }) {
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 200) + "px";
   }, [text]);
-  useEffect(() => ta.current?.focus(), []);
+  // Focus only when the user opened the panel, or the panel of the previous page had focus.
+  useEffect(() => {
+    if (openedByUser || tabHandover?.restoreFocus) ta.current?.focus();
+    const l = (t: TabPanelState) => {
+      if (t.draft) setText((cur) => cur || t.draft);
+      if (t.restoreFocus) ta.current?.focus();
+    };
+    handoverListeners.add(l);
+    return () => void handoverListeners.delete(l);
+  }, []);
+  const update = (v: string) => {
+    setText(v);
+    clearTimeout(draftTimer.current);
+    draftTimer.current = setTimeout(() => send({ type: "draft", text: v }), 250);
+  };
   const ready = s.connection === "connected" && !!p;
   const canSend = !s.running && text.trim().length > 0 && ready;
   const submit = () => {
     if (!canSend) return;
+    clearTimeout(draftTimer.current);
     send({ type: "send", text, includeSelection: withSel });
     setText("");
   };
-  const ctx = s.context;
   const loading = s.connection === "connecting" || (s.connection === "connected" && s.providers.length === 0);
   const placeholder = loading ? "Connecting…" : !ready ? "Sign in to Claude or ChatGPT in Settings" : p?.id === "chatgpt" ? "Ask ChatGPT about this page" : "How can I help with this page?";
   return (
     <div className="composer">
       <div className="composer-box" onClick={(e) => { if (e.target === e.currentTarget) ta.current?.focus(); }}>
-        {(ctx?.title || ctx?.url) && (
-          <div className="ctx-row">
-            <span className="ctx-chip" title={ctx.url}>{I.doc}<span className="ctx-title">{ctx.title || ctx.url}</span></span>
-            <button className={`ctx-chip toggle ${withSel ? "on" : ""}`} onClick={() => setWithSel(!withSel)} aria-pressed={withSel}
-              title="Also send the text you have highlighted on the page (not the whole page — the agent reads the page itself when needed)">
-              {I.quote}<span>Selected text</span>
-            </button>
-          </div>
-        )}
+        <div className="ctx-row">
+          <button className={`ctx-chip toggle ${withSel ? "on" : ""}`} onClick={() => setWithSel(!withSel)} aria-pressed={withSel}
+            title="Also send the text you have highlighted on the page (not the whole page — the agent reads the page itself when needed)">
+            {I.quote}<span>Selected text</span>
+          </button>
+        </div>
         <textarea
           ref={ta}
           rows={1}
           placeholder={placeholder}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => update(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
@@ -509,7 +569,7 @@ function Chat({ s }: { s: PanelState }) {
               ))}
             </div>
           )}
-          {s.connection !== "connected" && <div className="error-card">{s.connectionDetail || "Connecting to Safari Agent…"}</div>}
+          {s.connection !== "connected" && s.connection !== "connecting" && <div className="error-card">{s.connectionDetail || "Connecting to Orbit…"}</div>}
           {s.connection === "connected" && !p && s.providers.length > 0 && (
             <div className="notice center">Sign in to Claude or ChatGPT in Settings to get started.</div>
           )}
@@ -602,7 +662,7 @@ function SettingsView({ s }: { s: PanelState }) {
         </div>
       </section>
       <section className="group">
-        <h3>Tab Access</h3>
+        <h3>Browser Access</h3>
         <div className="group-box">
           {SCOPES.map((m) => (
             <button key={m.id} className="row clickable" onClick={() => send({ type: "settings", settings: { tabScope: m.id } })}>
@@ -614,15 +674,49 @@ function SettingsView({ s }: { s: PanelState }) {
         <p className="footnote">Actions always happen in the tab where you sent your message, even if you switch tabs meanwhile.</p>
       </section>
       <section className="group">
+        <h3>Computer Access</h3>
+        <div className="group-box">
+          {COMPUTER.map((m) => (
+            <button key={m.id} className="row clickable" onClick={() => send({ type: "set_computer_access", access: m.id })}>
+              <div className="row-text"><div className="row-title">{m.title}</div><div className="row-sub">{m.sub}</div></div>
+              {s.agent.computerAccess === m.id && <span className="mi-check">{I.check}</span>}
+            </button>
+          ))}
+          {s.agent.computerAccess === "folders" && (
+            <>
+              {s.agent.folders.map((f) => (
+                <div key={f} className="row">
+                  <div className="row-text"><div className="row-title">{shortPath(f)}</div><div className="row-sub">{f}</div></div>
+                  <button className="ghost-icon del" title="Remove" onClick={() => send({ type: "set_computer_access", removeFolder: f })}>{I.trash}</button>
+                </div>
+              ))}
+              <button className="row clickable" onClick={() => send({ type: "choose_folders" })}>
+                <div className="row-text"><div className="row-title">Choose Folders…</div></div>
+              </button>
+            </>
+          )}
+          {s.agent.computerAccess === "full" && (
+            <button className="row clickable" onClick={() => send({ type: "set_computer_access", allowCommands: !s.agent.allowCommands })}>
+              <div className="row-text"><div className="row-title">Allow shell commands</div><div className="row-sub">Every command is shown to you before it runs.</div></div>
+              {s.agent.allowCommands && <span className="mi-check">{I.check}</span>}
+            </button>
+          )}
+        </div>
+        <p className="footnote">Enforced by the Orbit app, not the AI model. Chats that read websites always ask before changing files; chats that read your files ask before sending anything to a website.</p>
+      </section>
+      <section className="group">
         <h3>Connection</h3>
         <div className="group-box">
           <div className="row">
             <span className={`conn ${s.connection === "connected" ? "ok" : s.connection === "connecting" ? "pending" : "bad"}`} />
-            <div className="row-text"><div className="row-title">Safari Agent helper</div><div className="row-sub">{s.connection === "connected" ? "Connected · local only" : s.connectionDetail || "Not connected"}</div></div>
+            <div className="row-text"><div className="row-title">Orbit app</div><div className="row-sub">{s.connection === "connected" ? "Connected · local only" : s.connectionDetail || "Not connected"}</div></div>
             {s.connection !== "connected" && <button className="btn small" onClick={() => send({ type: "reconnect" })}>Retry</button>}
           </div>
           <button className="row clickable" onClick={() => send({ type: "refresh_providers" })}>
             <div className="row-text"><div className="row-title">Refresh Status</div></div>
+          </button>
+          <button className="row clickable" onClick={() => send({ type: "open_app_settings" })}>
+            <div className="row-text"><div className="row-title">Open Orbit Settings…</div><div className="row-sub">Profiles, picker, website routing and shared logins{s.profile ? ` · this is your “${s.profile.name}” profile` : ""}</div></div>
           </button>
         </div>
         <p className="footnote">Toggle the panel with ⌥⌘K or the toolbar button.</p>
@@ -631,14 +725,21 @@ function SettingsView({ s }: { s: PanelState }) {
   );
 }
 
+function shortPath(p: string) {
+  const parts = p.split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : p;
+}
+
 // ---------- app ----------
 
 function App() {
-  const [s, setS] = useState<PanelState | null>(null);
+  const [s, setS] = useState<PanelState | null>(() => lastState);
   const [view, setView] = useState("chat");
   useEffect(() => {
     const l = (st: PanelState) => setS(st);
     listeners.add(l);
+    if (lastState) setS(lastState);
+    else send({ type: "init" });
     return () => void listeners.delete(l);
   }, []);
   const provider = s ? currentProvider(s)?.id || "claude" : "claude";
@@ -659,3 +760,7 @@ function App() {
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
+// Tell the page-attached host that the panel UI booted (see content.ts).
+if (mode === "page" && params.get("n")) {
+  try { window.parent.postMessage({ orbitPanelReady: params.get("n") }, "*"); } catch { /* ignore */ }
+}

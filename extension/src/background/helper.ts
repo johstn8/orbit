@@ -10,6 +10,20 @@ declare const browser: any;
 
 export type HelperListener = (msg: any) => void;
 
+let cachedInstanceId: string | null = null;
+async function localInstanceId(): Promise<string> {
+  if (cachedInstanceId) return cachedInstanceId;
+  try {
+    const s = await browser.storage.local.get("orbitInstanceId");
+    if (s?.orbitInstanceId) return (cachedInstanceId = String(s.orbitInstanceId));
+    const id = "local-" + (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36));
+    await browser.storage.local.set({ orbitInstanceId: id });
+    return (cachedInstanceId = id);
+  } catch {
+    return "default";
+  }
+}
+
 export class HelperConnection {
   private ws: WebSocket | null = null;
   private pending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: any }>();
@@ -19,6 +33,9 @@ export class HelperConnection {
   private reconnectTimer: any = null;
   state: "connecting" | "connected" | "helper_unavailable" | "error" = "connecting";
   detail = "";
+  /** Safari profile of this extension instance (from the native app extension). */
+  profileId = "default";
+  profileKeyPresent = false;
 
   constructor(
     private hello: () => any,
@@ -53,12 +70,18 @@ export class HelperConnection {
     try {
       info = await browser.runtime.sendNativeMessage("dev.local.SafariAgent", { type: "connection_info" });
     } catch (e: any) {
-      this.setState("helper_unavailable", "Safari could not reach the Safari Agent app extension. Make sure Safari Agent.app is installed and the extension is enabled.");
+      this.setState("helper_unavailable", "Safari could not reach the Orbit app extension. Make sure Orbit.app is installed and the extension is enabled.");
       this.scheduleReconnect();
       throw e;
     }
+    // Safari names the profile in native messages (SFExtensionProfileKey) where it can.
+    // Otherwise each profile's extension instance keeps its own random id in its own
+    // storage (extension storage is separate per Safari profile).
+    if (info?.profile && info.profile !== "default") this.profileId = String(info.profile);
+    else this.profileId = await localInstanceId();
+    this.profileKeyPresent = !!info?.profileKeyPresent;
     if (!info || !info.port || !info.token) {
-      this.setState("helper_unavailable", info?.error || "The Safari Agent helper app is not running. Open Safari Agent.app.");
+      this.setState("helper_unavailable", info?.error || "The Orbit app is not running. Open Orbit from your Applications folder.");
       this.scheduleReconnect();
       throw new Error("helper unavailable");
     }
@@ -73,9 +96,9 @@ export class HelperConnection {
         this.scheduleReconnect();
         reject(new Error(why));
       };
-      const timer = setTimeout(() => fail("Timed out connecting to the Safari Agent helper."), 6000);
+      const timer = setTimeout(() => fail("Timed out connecting to the Orbit app."), 6000);
       ws.onopen = () => {
-        ws.send(JSON.stringify({ type: "hello", token: info.token, role: "extension", ...this.hello() }));
+        ws.send(JSON.stringify({ type: "hello", token: info.token, role: "extension", profile: this.profileId, ...this.hello() }));
       };
       ws.onmessage = (ev) => {
         let msg: any;
@@ -105,18 +128,18 @@ export class HelperConnection {
         }
         this.onMessage(msg);
       };
-      ws.onerror = () => fail("Could not connect to the Safari Agent helper.");
+      ws.onerror = () => fail("Could not connect to the Orbit app.");
       ws.onclose = () => {
         clearTimeout(timer);
-        if (!settled) return fail("The Safari Agent helper closed the connection.");
+        if (!settled) return fail("The Orbit app closed the connection.");
         if (this.ws === ws) {
           this.ws = null;
           for (const [, p] of this.pending) {
             clearTimeout(p.timer);
-            p.reject(new Error("Lost connection to the Safari Agent helper."));
+            p.reject(new Error("Lost connection to the Orbit app."));
           }
           this.pending.clear();
-          this.setState("helper_unavailable", "Lost connection to the Safari Agent helper. Reconnecting…");
+          this.setState("helper_unavailable", "Lost connection to the Orbit app. Reconnecting…");
           this.scheduleReconnect();
         }
       };
@@ -137,7 +160,7 @@ export class HelperConnection {
   }
 
   send(msg: any) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) throw new Error("Not connected to the Safari Agent helper.");
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) throw new Error("Not connected to the Orbit app.");
     this.ws.send(JSON.stringify(msg));
   }
 

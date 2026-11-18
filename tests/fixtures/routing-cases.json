@@ -1,0 +1,31 @@
+{
+  "comment": "Shared test vectors for URL routing patterns. Used by extension/test/routing.test.ts and native/Tests/main.swift.",
+  "matches": [
+    { "pattern": "moodle.uni-x.de", "url": "https://moodle.uni-x.de/course/view.php?id=4", "expect": true },
+    { "pattern": "moodle.uni-x.de", "url": "https://www.moodle.uni-x.de/", "expect": true },
+    { "pattern": "moodle.uni-x.de", "url": "https://notmoodle.uni-x.de/", "expect": false },
+    { "pattern": "uni-x.de", "url": "https://mail.uni-x.de/inbox", "expect": true },
+    { "pattern": "uni-x.de", "url": "https://uni-x.de.evil.com/", "expect": false },
+    { "pattern": "*.uni-x.de", "url": "https://uni-x.de/", "expect": true },
+    { "pattern": "*.uni-x.de", "url": "https://a.b.uni-x.de/x", "expect": true },
+    { "pattern": "Moodle.Uni-X.de", "url": "https://moodle.uni-x.de/", "expect": true },
+    { "pattern": "https://github.com/myorg", "url": "https://github.com/myorg/repo", "expect": true },
+    { "pattern": "github.com/myorg", "url": "https://github.com/other/repo", "expect": false },
+    { "pattern": "github.com/myorg/*/issues", "url": "https://github.com/myorg/app/issues/3", "expect": true },
+    { "pattern": "github.com/myorg/*/issues", "url": "https://github.com/myorg/app/pulls", "expect": false },
+    { "pattern": "moodle.*.de", "url": "https://moodle.uni-y.de/", "expect": true },
+    { "pattern": "moodle.*.de", "url": "https://moodle.uni-y.com/", "expect": false },
+    { "pattern": "example.com:8080", "url": "http://example.com:8080/a", "expect": true },
+    { "pattern": "/^https://docs\\.google\\.com/.*edu/", "url": "https://docs.google.com/document/d/edu123", "expect": true },
+    { "pattern": "/^https://docs\\.google\\.com/.*edu/", "url": "https://docs.google.com/document/d/abc", "expect": false },
+    { "pattern": "example.com", "url": "ftp://example.com/file", "expect": false },
+    { "pattern": "example.com", "url": "about:blank", "expect": false },
+    { "pattern": "", "url": "https://example.com/", "expect": false }
+  ],
+  "targets": [
+    { "rules": [ { "pattern": "login.uni-x.de", "profileId": "" }, { "pattern": "uni-x.de", "profileId": "UNI" } ], "url": "https://login.uni-x.de/sso", "expect": null },
+    { "rules": [ { "pattern": "login.uni-x.de", "profileId": "" }, { "pattern": "uni-x.de", "profileId": "UNI" } ], "url": "https://moodle.uni-x.de/", "expect": "UNI" },
+    { "rules": [ { "pattern": "uni-x.de", "profileId": "UNI", "enabled": false }, { "pattern": "uni-x.de", "profileId": "WORK" } ], "url": "https://uni-x.de/", "expect": "WORK" },
+    { "rules": [], "url": "https://uni-x.de/", "expect": null }
+  ]
+}

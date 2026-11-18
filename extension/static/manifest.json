@@ -17,7 +17,7 @@
     ]
   },
   "action": {
-    "default_title": "Safari Agent (⌥⌘K)",
+    "default_title": "Orbit (⌥⌘K)",
     "default_icon": {
       "16": "icons/toolbar-16.png",
       "32": "icons/toolbar-32.png",
@@ -26,7 +26,7 @@
   },
   "commands": {
     "toggle-panel": {
-      "description": "Open or close the Safari Agent panel",
+      "description": "Open or close the Orbit panel",
       "suggested_key": {
         "default": "Alt+Shift+K",
         "mac": "Alt+Command+K"
@@ -41,7 +41,7 @@
       "matches": [
         "<all_urls>"
       ],
-      "run_at": "document_idle",
+      "run_at": "document_start",
       "all_frames": false
     }
   ],
@@ -62,7 +62,10 @@
     "scripting",
     "storage",
     "nativeMessaging",
-    "activeTab"
+    "activeTab",
+    "webNavigation",
+    "cookies",
+    "alarms"
   ],
   "host_permissions": [
     "<all_urls>"
