@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import ApplicationServices
 import SQLite3
+import CloudKit
 
 /// Knows the user's Safari profiles.
 ///
@@ -25,6 +26,7 @@ final class ProfileRegistry: ObservableObject {
     @Published private(set) var colorSource = "Default colors"
     /// Result of the last sync with Safari, shown in Settings.
     @Published private(set) var syncResult: String?
+    @Published private(set) var lastSyncAt: Date?
 
     private var windowCreations: [(Date, String)] = []
     private var syncTimer: Timer?
@@ -163,9 +165,13 @@ final class ProfileRegistry: ObservableObject {
         case .notFound: colorSource = "Safari's profile data wasn't found"
         case .unrecognized(let why): colorSource = "Couldn't read Safari's colors (\(why))"
         }
-        let dbInfo = db.infos
-        let names = menu.map(\.name)
         let defaultName = menu.first { $0.isDefault }?.name
+        let dbInfo = db.infos.map { i -> SafariProfileStore.Info in
+            var i = i
+            if i.name == "\u{0}default", let d = defaultName { i.name = d }
+            return i
+        }
+        let names = menu.map(\.name)
         SettingsStore.shared.update { st in
             // The default profile's instance (stored id) is the profile Safari marks as default.
             if let defaultName, !st.profiles.contains(where: { $0.detectedName == defaultName }),
@@ -218,6 +224,7 @@ final class ProfileRegistry: ObservableObject {
                 if let c = st.profiles[i].safariColor { st.profiles[i].color = c }
             }
         }
+        lastSyncAt = Date()
         let time = Date().formatted(date: .omitted, time: .shortened)
         return note("Updated from Safari at \(time): \(names.joined(separator: ", ")).")
     }
@@ -459,14 +466,30 @@ enum SafariProfileStore {
         guard cols.contains("title"), cols.contains("subtype") else { return .unrecognized("no bookmarks.subtype") }
         let blobCols = ["extra_attributes", "local_attributes"].filter(cols.contains)
         let uuidCol = cols.contains("external_uuid") ? "external_uuid" : "NULL"
-        let sql = "SELECT title, \(uuidCol)\(blobCols.map { ", " + $0 }.joined()) FROM bookmarks WHERE subtype = 2 AND title IS NOT NULL"
+        // Safari's per-profile settings: the color lives under key "ProfileColor" (archived NSColor).
+        var colors: [Int64: String] = [:]
+        var cq: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT parent, value FROM settings WHERE key = 'ProfileColor'", -1, &cq, nil) == SQLITE_OK {
+            while sqlite3_step(cq) == SQLITE_ROW {
+                let parent = sqlite3_column_int64(cq, 0)
+                guard let b = sqlite3_column_blob(cq, 1) else { continue }
+                if let c = decodeColor(Data(bytes: b, count: Int(sqlite3_column_bytes(cq, 1)))) { colors[parent] = c }
+            }
+        }
+        sqlite3_finalize(cq)
+        let sql = "SELECT title, \(uuidCol)\(blobCols.map { ", " + $0 }.joined()), id, external_uuid FROM bookmarks WHERE subtype = 2"
         var st: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK else { return .unrecognized("query failed") }
         defer { sqlite3_finalize(st) }
         var infos: [Info] = []
+        let idCol = Int32(2 + blobCols.count)
         while sqlite3_step(st) == SQLITE_ROW {
-            guard let t = sqlite3_column_text(st, 0) else { continue }
-            var info = Info(name: String(cString: t))
+            let rawTitle = sqlite3_column_text(st, 0).map { String(cString: $0) } ?? ""
+            let ext = sqlite3_column_text(st, idCol + 1).map { String(cString: $0) } ?? ""
+            // The default profile's row has no title; it is marked by external_uuid "DefaultProfile".
+            var info = Info(name: rawTitle.isEmpty && ext == "DefaultProfile" ? "\u{0}default" : rawTitle)
+            if info.name.isEmpty { continue }
+            if let c = colors[sqlite3_column_int64(st, idCol)] { info.color = c }
             if let u = sqlite3_column_text(st, 1) { info.uuid = String(cString: u) }
             for k in 0..<blobCols.count {
                 let col = Int32(2 + k)
@@ -478,6 +501,136 @@ enum SafariProfileStore {
             infos.append(info)
         }
         return infos.isEmpty ? .unrecognized("no profile rows") : .ok(infos)
+    }
+
+    /// Diagnostics: profile rows with the key paths (names and value types only) of their attribute plists.
+    static func describeSchema() -> JSONObject {
+        let path = url.path
+        var db: OpaquePointer?
+        guard sqlite3_open_v2("file:\(path)?mode=ro", &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK, let db else { return ["error": "open failed"] }
+        defer { sqlite3_close(db) }
+        var st: OpaquePointer?
+        var rows: [JSONObject] = []
+        let sql = "SELECT title, subtype, type, extra_attributes, local_attributes FROM bookmarks WHERE subtype = 2 OR title IN (SELECT title FROM bookmarks WHERE subtype = 2) LIMIT 12"
+        guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK else { return ["error": String(cString: sqlite3_errmsg(db))] }
+        defer { sqlite3_finalize(st) }
+        func keys(_ v: Any, _ prefix: String, _ out: inout [String]) {
+            if let d = v as? [String: Any] { for (k, x) in d { keys(x, prefix + "/" + k, &out) } }
+            else if let a = v as? [Any] { out.append(prefix + "[\(a.count)]"); if let f = a.first { keys(f, prefix + "[0]", &out) } }
+            else { out.append(prefix + ":" + String(describing: type(of: v)) + ((v as? String).map { $0.count < 40 && !$0.contains("http") ? "=" + $0 : "" } ?? "")) }
+        }
+        while sqlite3_step(st) == SQLITE_ROW {
+            var r: JSONObject = ["title": sqlite3_column_text(st, 0).map { String(cString: $0) } ?? "", "subtype": Int(sqlite3_column_int(st, 1)), "type": Int(sqlite3_column_int(st, 2))]
+            for (i, col) in ["extra", "local"].enumerated() {
+                let c = Int32(3 + i)
+                guard let b = sqlite3_column_blob(st, c) else { continue }
+                let data = Data(bytes: b, count: Int(sqlite3_column_bytes(st, c)))
+                var out: [String] = []
+                if let p = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) { keys(p, "", &out) }
+                r[col] = Array(out.prefix(40))
+            }
+            rows.append(r)
+        }
+        // Tables and columns, to find where colors live.
+        var tables: JSONObject = [:]
+        var tq: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table'", -1, &tq, nil) == SQLITE_OK {
+            var names: [String] = []
+            while sqlite3_step(tq) == SQLITE_ROW { if let t = sqlite3_column_text(tq, 0) { names.append(String(cString: t)) } }
+            sqlite3_finalize(tq)
+            for n in names {
+                var cq: OpaquePointer?
+                var cols: [String] = []
+                if sqlite3_prepare_v2(db, "PRAGMA table_info(\(n))", -1, &cq, nil) == SQLITE_OK {
+                    while sqlite3_step(cq) == SQLITE_ROW { if let c = sqlite3_column_text(cq, 1) { cols.append(String(cString: c)) } }
+                }
+                sqlite3_finalize(cq)
+                tables[n] = cols
+            }
+        }
+        // Profile rows: every non-empty column (names only, short values).
+        var full: [JSONObject] = []
+        var fq: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT * FROM bookmarks WHERE subtype = 2", -1, &fq, nil) == SQLITE_OK {
+            while sqlite3_step(fq) == SQLITE_ROW {
+                var r: JSONObject = [:]
+                for i in 0..<sqlite3_column_count(fq) {
+                    let name = String(cString: sqlite3_column_name(fq, i))
+                    switch sqlite3_column_type(fq, i) {
+                    case SQLITE_NULL: continue
+                    case SQLITE_BLOB: r[name] = "blob(\(sqlite3_column_bytes(fq, i)))"
+                    case SQLITE_TEXT: let t = String(cString: sqlite3_column_text(fq, i)); r[name] = t.count < 48 ? t : "text(\(t.count))"
+                    default: r[name] = sqlite3_column_double(fq, i)
+                    }
+                }
+                full.append(r)
+            }
+            sqlite3_finalize(fq)
+        }
+        // The iCloud record of each profile (sync_data): field names and simple values.
+        var records: [JSONObject] = []
+        var rq: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT title, sync_data FROM bookmarks WHERE subtype = 2", -1, &rq, nil) == SQLITE_OK {
+            while sqlite3_step(rq) == SQLITE_ROW {
+                var r: JSONObject = ["title": sqlite3_column_text(rq, 0).map { String(cString: $0) } ?? ""]
+                if let b = sqlite3_column_blob(rq, 1) {
+                    let data = Data(bytes: b, count: Int(sqlite3_column_bytes(rq, 1)))
+                    if let rec = try? NSKeyedUnarchiver.unarchivedObject(ofClass: CKRecord.self, from: data) {
+                        var fields: [String] = []
+                        for k in rec.allKeys() {
+                            let v = rec[k]
+                            var d = String(describing: type(of: v as Any))
+                            if let sv = v as? String, sv.count < 40 { d += "=" + sv }
+                            if let nv = v as? NSNumber { d += "=" + nv.stringValue }
+                            if let dv = v as? Data { d += "(\(dv.count))" }
+                            fields.append(k + ":" + d)
+                        }
+                        r["recordType"] = rec.recordType
+                        r["fields"] = fields.sorted()
+                    } else if let pl = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] {
+                        // A keyed archive: list its short strings (field names, class names).
+                        let objs = (pl["$objects"] as? [Any]) ?? []
+                        let strs = objs.compactMap { $0 as? String }.filter { $0.count < 48 && !$0.contains("http") }
+                        r["fields"] = Array(strs.prefix(80))
+                        r["recordType"] = (pl["$archiver"] as? String) ?? "plist"
+                    } else { r["fields"] = "unknown format (\(data.prefix(8).map { String(format: "%02x", $0) }.joined()))" }
+                }
+                records.append(r)
+            }
+            sqlite3_finalize(rq)
+        }
+        var settingsRows: [String] = []
+        var sq: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT parent, key, typeof(value), length(value) FROM settings LIMIT 200", -1, &sq, nil) == SQLITE_OK {
+            while sqlite3_step(sq) == SQLITE_ROW {
+                let parent = sqlite3_column_text(sq, 0).map { String(cString: $0) } ?? "-"
+                let key = sqlite3_column_text(sq, 1).map { String(cString: $0) } ?? "?"
+                let t = sqlite3_column_text(sq, 2).map { String(cString: $0) } ?? "?"
+                settingsRows.append("\(parent.prefix(8)) \(key) \(t)(\(sqlite3_column_int(sq, 3)))")
+            }
+            sqlite3_finalize(sq)
+        }
+        var colorDump: [String] = []
+        var pq: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT parent, value FROM settings WHERE key = 'ProfileColor'", -1, &pq, nil) == SQLITE_OK {
+            while sqlite3_step(pq) == SQLITE_ROW {
+                guard let b = sqlite3_column_blob(pq, 1) else { continue }
+                let data = Data(bytes: b, count: Int(sqlite3_column_bytes(pq, 1)))
+                var line = "\(sqlite3_column_int64(pq, 0)): decoded=\(decodeColor(data) ?? "nil") head=\(data.prefix(8).map { String(format: "%02x", $0) }.joined())"
+                if let pl = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] {
+                    let objs = (pl["$objects"] as? [Any]) ?? []
+                    line += " objs=" + objs.prefix(12).map { o -> String in
+                        if let d = o as? [String: Any] { return "{" + d.keys.sorted().joined(separator: ",") + "}" }
+                        if let str = o as? String { return "\"" + str.prefix(30) + "\"" }
+                        if let dd = o as? Data { return "data(\(dd.count))" }
+                        return String(describing: type(of: o))
+                    }.joined(separator: " ")
+                }
+                colorDump.append(line)
+            }
+            sqlite3_finalize(pq)
+        }
+        return ["rows": rows, "tables": tables, "profileRows": full, "records": records, "settings": settingsRows, "colors": colorDump]
     }
 
     /// Look for an SF Symbol name and a color anywhere in Safari's attribute plists.
@@ -496,6 +649,37 @@ enum SafariProfileStore {
                   let c = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data), let s = c.usingColorSpace(.sRGB) {
             info.color = hex(Double(s.redComponent), Double(s.greenComponent), Double(s.blueComponent))
         }
+    }
+
+    /// ProfileColor values: Safari archives its own color object with redComponent,
+    /// greenComponent, blueComponent, alphaComponent and colorName ("clear" = no color).
+    static func decodeColor(_ data: Data) -> String? {
+        if let pl = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
+           let objs = pl["$objects"] as? [Any],
+           let dict = objs.first(where: { ($0 as? [String: Any])?["redComponent"] != nil }) as? [String: Any] {
+            func resolve(_ v: Any?) -> Any? {
+                guard let v else { return nil }
+                // Keyed-archive references print as "<CFKeyedArchiverUID …>{value = N}".
+                let d = String(describing: v)
+                if d.contains("CFKeyedArchiverUID"), let r = d.range(of: "value = "),
+                   let n = Int(d[r.upperBound...].prefix { $0.isNumber }), objs.indices.contains(n) { return objs[n] }
+                return v
+            }
+            func num(_ k: String) -> Double? { (resolve(dict[k]) as? NSNumber)?.doubleValue }
+            let name = resolve(dict["colorName"]) as? String
+            // No color in Safari: Safari shows the profile in neutral gray.
+            if name == "clear" || (num("alphaComponent") ?? 1) < 0.05 { return "#8E8E93" }
+            if let r = num("redComponent"), let g = num("greenComponent"), let b = num("blueComponent") { return hex(r, g, b) }
+        }
+        if let c = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data), let s = c.usingColorSpace(.sRGB) {
+            return hex(Double(s.redComponent), Double(s.greenComponent), Double(s.blueComponent))
+        }
+        if let pl = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) {
+            var info = Info(name: "")
+            scan(pl, key: "color", into: &info)
+            return info.color
+        }
+        return nil
     }
 
     private static func rgb(_ d: [String: Any]) -> String? {

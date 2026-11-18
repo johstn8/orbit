@@ -47,12 +47,19 @@ export class HelperConnection {
     return this.ws?.readyState === WebSocket.OPEN && this.state === "connected";
   }
 
+  private connectingSince = 0;
+
   ensure(): Promise<void> {
     if (this.connected) return Promise.resolve();
+    // An attempt can hang forever, e.g. when Safari never answers a native message
+    // because the Orbit app was replaced mid-request. Never wait on one for long.
+    if (this.connecting && Date.now() - this.connectingSince > 12000) this.connecting = null;
     if (!this.connecting) {
-      this.connecting = this.connect().finally(() => {
-        this.connecting = null;
+      this.connectingSince = Date.now();
+      const attempt: Promise<void> = this.connect().finally(() => {
+        if (this.connecting === attempt) this.connecting = null;
       });
+      this.connecting = attempt;
     }
     return this.connecting;
   }
@@ -68,7 +75,10 @@ export class HelperConnection {
     this.setState("connecting");
     let info: any;
     try {
-      info = await browser.runtime.sendNativeMessage("dev.local.SafariAgent", { type: "connection_info" });
+      info = await Promise.race([
+        browser.runtime.sendNativeMessage("dev.local.SafariAgent", { type: "connection_info" }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("The Orbit app extension didn't answer.")), 8000)),
+      ]);
     } catch (e: any) {
       this.setState("helper_unavailable", "Safari could not reach the Orbit app extension. Make sure Orbit.app is installed and the extension is enabled.");
       this.scheduleReconnect();

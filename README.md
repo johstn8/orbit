@@ -7,6 +7,7 @@
 | **Profile picker** | A Liquid Glass picker (five designs) to choose a Safari profile. It appears for links from other apps and on a global shortcut. |
 | **Website routing** | Rules such as `moodle.uni.de → University` open a site in the right Safari profile. The tab you came from stays untouched. |
 | **Shared logins** | Opt-in, per website: stay signed in to a site (e.g. ChatGPT) in several Safari profiles. |
+| **Shared history** | One searchable history of the pages you open in any profile (⌃⌥H), plus one Orbit chat history for all profiles. |
 | **AI agent** | A sidebar in Safari that reads and operates your real tabs. With your permission, it can also work with local files. |
 | **Permissions** | Browser access and computer access are configured separately. They are enforced by Orbit itself, not by the AI model. |
 
@@ -53,11 +54,13 @@ This README is the full system overview: what exists, how the parts fit together
 - **Profile identity:**
   - Safari reports the profile UUID (`SFExtensionProfileKey`) for non-default profiles, but not for the default profile. That one keeps its own id in its extension storage.
   - Names, icons and order come from Safari's UI (Accessibility).
-  - Colors are in Safari's protected profile database (Full Disk Access). Without it, Orbit uses its own colors; you can customize each profile.
+  - Colors are in Safari's protected profile database (`SafariTabs.db`, setting `ProfileColor`), which Orbit reads with Full Disk Access. A profile without a color in Safari shows gray, as in Safari. You can customize each profile.
 - **Extensions sleep:** Safari suspends each profile's extension about 30 s after its last use and wakes it on events (Orbit also wakes it every minute).
   - Picking and focusing windows therefore goes through Safari's UI, which always works.
   - Opening a URL uses the profile's extension when it is awake, otherwise Safari's UI plus AppleScript.
-- **Search history can't be synced:** Safari gives extensions no history, bookmarks or session API (verified), and Orbit won't write into Safari's private databases. Sharing your Google login carries Google's search history and suggestions between profiles.
+- **Safari's own history stays per profile:** Apple keeps it separate by design, and Safari gives extensions no history, bookmarks or session API (verified). Orbit won't write into Safari's private databases.
+  - Instead, Orbit keeps its own **shared history** across profiles, searchable with ⌃⌥H.
+  - Sharing your Google login also carries Google's own search history and suggestions.
 - **Typed URLs:**
   - Orbit stops a navigation from inside the old page before it unloads, so the page stays untouched; this was measured.
   - If the stop comes too late (rare, e.g. a cached page), Orbit goes back, and Safari's back-forward cache restores the page when the page allows it.
@@ -187,9 +190,17 @@ Key ideas:
   - Add cookie names that should never be copied (exceptions).
   - Turn sharing on or off per site; nothing is shared by default.
 - **How it works:**
+  - **Which cookie store:** in non-default profiles Safari lists two cookie stores to the extension (measured):
+    - The default store (calls without `storeId`) is not the one the profile's websites use.
+    - The right store is the one Safari lists together with the profile's open tabs, and Orbit always writes there.
+    - The default profile has a single store.
+    - Earlier builds wrote into the wrong store, so logins didn't arrive. Those stray copies are removed automatically.
   - The source instance watches `cookies.onChanged` for those domains only and reports the domain (no values).
   - Orbit asks the source to export the site's cookies; HttpOnly cookies are included, as verified. It then asks each connected target instance to import them, replacing that site's old cookies.
-  - It syncs when the login changes, when a profile connects, and on "Sync Now".
+  - It syncs when the login changes, when a profile connects, when you start using a target profile's window (at most every 10 minutes), and on "Sync Now".
+  - Safari names a profile's store only while that profile is in use, and suspends idle extensions. Orbit therefore keeps the source's last login **in memory** (never on disk) for 12 hours, so a target can be updated while the source sleeps.
+  - **Success is verified:** after importing, the target's store is read back. A target counts as shared when all cookies arrived, or only minor ones that Safari refused (no session or auth cookies).
+  - "Sync Now" shows progress, then "Synced ✓" or "Not Synced" next to the status line.
 - **Privacy:**
   - Cookie values only pass through memory over the authenticated loopback connection.
   - Orbit never writes or logs them.
@@ -201,7 +212,19 @@ Key ideas:
   - A target only updates while its profile is running.
   - iCloud Keychain passwords and passkeys already work in all profiles, which is the most robust alternative.
 
-### 3.4 AI agent and permissions
+### 3.4 Shared history (Settings › Shared History)
+
+- **Pages from all profiles:** each profile's Orbit extension reports the pages you open (URL and title).
+  - Private windows are never recorded, and you can exclude profiles.
+  - Orbit stores them locally (`history.json`, 0600), for 3 months by default. "Clear Orbit History…" removes them.
+  - The AI agent can't read them.
+- **Search:** ⌃⌥H or the menu bar opens a glass search window over all profiles.
+  - **Return** opens the page in the profile you're using now; **⌘Return** opens it in the profile you saw it in.
+- **Orbit chats:** one chat history for all profiles, on by default (Settings › AI Agent).
+  - Chats from other profiles are labeled with their profile.
+  - The agent always works in the profile where you continue a chat.
+
+### 3.5 AI agent and permissions
 
 **Browser access** is chosen per chat in the panel (shield menu or Settings) and enforced by the extension executor:
 
@@ -236,7 +259,7 @@ Safeguards, independent of the model:
   - For ChatGPT, the tools are sent per request.
 - **Folder choice:** folders can only be added through the macOS folder chooser, so neither a web page nor the extension can grant itself access.
 
-### 3.5 Sidebar fixes (root causes, details in REPORT)
+### 3.6 Sidebar fixes (root causes, details in REPORT)
 
 | Symptom | Root cause | Fix |
 |---|---|---|
@@ -309,6 +332,7 @@ The manifest grants `tabs`, `scripting`, `storage`, `nativeMessaging`, `activeTa
 | `Core/Profiles.swift` | `ProfileRegistry`, `SafariAX` and `SafariController`. Details below the table |
 | `Core/Routing.swift` | `RoutePattern` (matcher) and `Router` (route.open, loop guard, links from other apps) |
 | `Core/SafariDockWatcher.swift` | Safari's Dock icon with no window open: opens a profile window or shows the profiles in a row |
+| `Core/HistoryStore.swift`, `Picker/HistoryPanel.swift` | Shared history across profiles and its search window |
 | `Core/SessionSharing.swift` | Shared-login orchestration (source → targets) |
 | `Core/NativeTools.swift` | File and command tools, `PathPolicy`, `FolderPicker` |
 | `Core/Prompts.swift` | System prompt (browser, profiles, files, safety) and per-message context (profile, access levels) |
@@ -349,6 +373,7 @@ The manifest grants `tabs`, `scripting`, `storage`, `nativeMessaging`, `activeTa
 | What | Where |
 |---|---|
 | Settings (profiles, picker, rules, shared sites, computer access) | `~/Library/Application Support/SafariAgent/settings.json` (0600) |
+| Shared history (pages from all profiles) | `…/SafariAgent/history.json` (0600) |
 | Conversations (now with `profileId`, history per profile) | `…/SafariAgent/conversations/*.json` (0600) |
 | Helper connection | `…/SafariAgent/connection.json` (port + per-launch token, 0600) |
 | ChatGPT tokens | Login Keychain (`dev.local.SafariAgent.chatgpt`) |

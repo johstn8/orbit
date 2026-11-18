@@ -5,7 +5,7 @@ import ServiceManagement
 import Carbon.HIToolbox
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, profiles, appearance, routing, logins, agent, about
+    case general, profiles, appearance, routing, logins, history, agent, about
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -14,6 +14,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .appearance: "Picker Appearance"
         case .routing: "Website Routing"
         case .logins: "Shared Logins"
+        case .history: "Shared History"
         case .agent: "AI Agent"
         case .about: "About"
         }
@@ -25,6 +26,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .appearance: "circle.grid.cross"
         case .routing: "arrow.triangle.branch"
         case .logins: "key.horizontal"
+        case .history: "clock.arrow.circlepath"
         case .agent: "sparkles"
         case .about: "info.circle"
         }
@@ -55,6 +57,7 @@ struct SettingsView: View {
                 case .appearance: AppearancePane()
                 case .routing: RoutingPane()
                 case .logins: LoginsPane()
+                case .history: HistoryPane()
                 case .agent: AgentPane(model: model)
                 case .about: AboutPane(model: model)
                 }
@@ -206,113 +209,213 @@ struct ShortcutRecorder: View {
 struct ProfilesPane: View {
     @ObservedObject private var store = SettingsStore.shared
     @ObservedObject private var registry = ProfileRegistry.shared
+    @State private var refreshing = false
+    @State private var refreshed = false
 
     static let symbolChoices = ["person.crop.circle.fill", "person.fill", "graduationcap.fill", "briefcase.fill", "house.fill", "hammer.fill", "star.fill",
                                 "heart.fill", "leaf.fill", "bolt.fill", "book.fill", "bag.fill", "gamecontroller.fill", "cart.fill", "airplane",
                                 "paintpalette.fill", "music.note", "camera.fill", "flask.fill", "globe.europe.africa.fill", "building.2.fill", "sparkles"]
 
+    private var unmatched: Bool { store.settings.listedProfiles.contains { $0.id.hasPrefix(ProfileRegistry.placeholderPrefix) } }
+
     var body: some View {
         Form {
+            if !registry.accessibilityTrusted {
+                Section {
+                    HStack(spacing: 12) {
+                        Image(systemName: "hand.raised.circle.fill").font(.title2).foregroundStyle(.orange)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Allow Accessibility").font(.body.weight(.medium))
+                            Text("Orbit reads your Safari profiles and switches windows through Safari's own interface.").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Allow…") { registry.requestAccessibility() }
+                    }
+                }
+            }
             Section {
-                if store.settings.profiles.isEmpty {
-                    Text("No profiles yet. Allow Accessibility (below) so Orbit can read your Safari profiles, and turn on the Orbit extension in each profile.")
-                        .foregroundStyle(.secondary)
+                if store.settings.listedProfiles.isEmpty {
+                    Text("No profiles yet. Open Safari — Orbit picks up its profiles automatically.").foregroundStyle(.secondary)
                 }
                 ForEach(store.settings.listedProfiles) { p in
                     ProfileRow(profile: p, connected: registry.connected.contains(p.id))
                 }
             } header: {
-                Text("Safari Profiles")
-            } footer: {
-                Text("Names, icons and order come from Safari. \(registry.colorSource)\(registry.colorSource == "Colors need Full Disk Access" ? " — or customize a profile." : ".") Turn on “Customize” to set your own.")
-            }
-            Section {
                 HStack {
-                    if !registry.accessibilityTrusted {
-                        Button("Allow Accessibility…") { registry.requestAccessibility() }
-                    }
-                    Button("Refresh from Safari") { registry.syncFromSafari() }
-                    Button(registry.identifying ? "Matching…" : "Match Extensions…") { Task { await registry.identifyProfiles() } }
-                        .disabled(registry.identifying || !registry.accessibilityTrusted)
-                        .help("Opens one window per profile for a moment to match each profile's Orbit extension. Usually not needed: profiles match automatically when you use one of their windows.")
-                    if registry.colorSource == "Colors need Full Disk Access" {
-                        Button("Use Safari's Colors…") {
-                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
-                        }.help("Safari keeps profile colors in a protected file. Give Orbit Full Disk Access to read them.")
-                    }
+                    Text("Safari Profiles")
                     Spacer()
+                    refreshControl
                 }
-                if let r = registry.syncResult { Text(r).font(.caption).foregroundStyle(.secondary) }
-                if let r = registry.identifyResult { Text(r).font(.caption).foregroundStyle(.secondary) }
+            } footer: {
+                Text("Names, icons and order follow Safari automatically. Use Customize… to give a profile its own look in Orbit.")
+            }
+            if unmatched {
+                Section {
+                    HStack {
+                        Text("Some profiles' Orbit extensions aren't matched yet. They match on their own when you use one of their windows.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button(registry.identifying ? "Matching…" : "Match Now") { Task { await registry.identifyProfiles() } }
+                            .disabled(registry.identifying || !registry.accessibilityTrusted)
+                    }
+                    if let r = registry.identifyResult { Text(r).font(.caption).foregroundStyle(.secondary) }
+                }
+            }
+            if registry.colorSource == "Colors need Full Disk Access" {
+                Section {
+                    HStack {
+                        Text("Safari keeps profile colors in a protected file. With Full Disk Access, Orbit uses Safari's colors too.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Open Privacy Settings…") {
+                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
+                        }
+                    }
+                }
             }
         }
         .formStyle(.grouped)
         .onAppear { registry.syncFromSafari() }
+    }
+
+    /// "Updated 17:42 ⟳" — spins while reading Safari and confirms with a checkmark.
+    private var refreshControl: some View {
+        HStack(spacing: 6) {
+            if refreshed {
+                Label("Up to date", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            } else if let at = registry.lastSyncAt {
+                Text("Updated \(at.formatted(date: .omitted, time: .shortened))").foregroundStyle(.secondary)
+            } else if let r = registry.syncResult {
+                Text(r).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Button {
+                withAnimation(.linear(duration: 0.6)) { refreshing = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    registry.syncFromSafari()
+                    refreshing = false
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { refreshed = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { withAnimation { refreshed = false } }
+                }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .rotationEffect(.degrees(refreshing ? 360 : 0))
+            }
+            .buttonStyle(.borderless)
+            .help("Read profiles from Safari again")
+            .disabled(!registry.accessibilityTrusted || refreshing)
+        }
+        .font(.caption)
+        .textCase(nil)
+    }
+}
+
+struct ProfileBadge: View {
+    let symbol: String
+    let color: String
+    var size: CGFloat = 32
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: size * 0.46, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(Circle().fill(Color(hex: color).gradient))
     }
 }
 
 struct ProfileRow: View {
     let profile: ProfileConfig
     let connected: Bool
-    @State private var showSymbols = false
+    @State private var editing = false
 
     private func update(_ f: @escaping (inout ProfileConfig) -> Void) {
         SettingsStore.shared.update { s in if let i = s.profiles.firstIndex(where: { $0.id == profile.id }) { f(&s.profiles[i]) } }
     }
 
+    private var status: String {
+        var parts: [String] = []
+        if profile.custom { parts.append("Custom look") }
+        if profile.id.hasPrefix(ProfileRegistry.placeholderPrefix) { parts.append("Orbit extension not matched yet") }
+        else { parts.append(connected ? "Orbit extension active" : "Orbit extension idle") }
+        return parts.joined(separator: " · ")
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
-                Button { if profile.custom { showSymbols.toggle() } } label: {
-                    Image(systemName: profile.symbol)
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 34, height: 34)
-                        .background(Circle().fill(Color(hex: profile.color).gradient))
-                }
-                .buttonStyle(.plain)
-                .disabled(!profile.custom)
-                .popover(isPresented: $showSymbols) {
-                    LazyVGrid(columns: Array(repeating: GridItem(.fixed(34)), count: 5), spacing: 8) {
-                        ForEach(ProfilesPane.symbolChoices, id: \.self) { sym in
-                            Button { update { $0.symbol = sym }; showSymbols = false } label: {
-                                Image(systemName: sym).frame(width: 30, height: 30)
-                                    .background(RoundedRectangle(cornerRadius: 8).fill(sym == profile.symbol ? Color.accentColor.opacity(0.25) : .clear))
-                            }.buttonStyle(.plain)
-                        }
-                    }.padding(12)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    if profile.custom {
-                        TextField("Name", text: Binding(get: { profile.name }, set: { v in update { $0.name = v } }))
-                            .textFieldStyle(.plain).font(.body.weight(.medium))
-                    } else {
-                        Text(profile.name).font(.body.weight(.medium))
-                    }
-                    HStack(spacing: 5) {
-                        StatusDot(ok: connected).scaleEffect(0.8)
-                        Text(connected ? "Extension connected" : (profile.id.hasPrefix(ProfileRegistry.placeholderPrefix) ? "Extension not matched yet" : "Extension asleep"))
-                            .font(.caption).foregroundStyle(.secondary)
-                        if profile.custom, let d = profile.detectedName, d != profile.name { Text("· Safari: \(d)").font(.caption).foregroundStyle(.tertiary) }
-                        if profile.isSafariDefault == true { Text("· Default").font(.caption).foregroundStyle(.tertiary) }
+        HStack(spacing: 12) {
+            ProfileBadge(symbol: profile.symbol, color: profile.color)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(profile.name).font(.body.weight(.medium))
+                    if profile.isSafariDefault == true {
+                        Text("Default").font(.caption2.weight(.medium)).foregroundStyle(.secondary)
+                            .padding(.horizontal, 6).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.primary.opacity(0.07)))
                     }
                 }
+                Text(status).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 12)
+            Toggle("In Picker", isOn: Binding(get: { !profile.hidden }, set: { v in update { $0.hidden = !v } }))
+                .toggleStyle(.checkbox)
+                .help("Show this profile in the picker and the menu bar")
+            Button(profile.custom ? "Edit…" : "Customize…") { editing = true }
+                .popover(isPresented: $editing, arrowEdge: .trailing) { ProfileEditor(profile: profile) }
+        }
+        .padding(.vertical, 3)
+    }
+}
+
+/// Custom name, icon and color for one profile, or back to Safari's.
+struct ProfileEditor: View {
+    let profile: ProfileConfig
+    @ObservedObject private var store = SettingsStore.shared
+    @Environment(\.dismiss) private var dismiss
+
+    private var current: ProfileConfig { store.settings.profile(profile.id) ?? profile }
+    private func update(_ f: @escaping (inout ProfileConfig) -> Void) {
+        SettingsStore.shared.update { s in if let i = s.profiles.firstIndex(where: { $0.id == profile.id }) { f(&s.profiles[i]); s.profiles[i].custom = true } }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                ProfileBadge(symbol: current.symbol, color: current.color, size: 40)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Appearance in Orbit").font(.headline)
+                    Text(current.detectedName.map { "Safari profile “\($0)”" } ?? "Safari profile").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            LabeledContent("Name") {
+                TextField("Name", text: Binding(get: { current.name }, set: { v in update { $0.name = v } })).frame(width: 180)
+            }
+            LabeledContent("Color") {
+                ColorPicker("", selection: Binding(get: { Color(hex: current.color) }, set: { c in update { $0.color = c.hexString } }), supportsOpacity: false).labelsHidden()
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Icon")
+                LazyVGrid(columns: Array(repeating: GridItem(.fixed(30), spacing: 6), count: 8), spacing: 6) {
+                    ForEach(ProfilesPane.symbolChoices, id: \.self) { sym in
+                        Button { update { $0.symbol = sym } } label: {
+                            Image(systemName: sym).frame(width: 28, height: 28)
+                                .background(RoundedRectangle(cornerRadius: 7).fill(sym == current.symbol ? Color.accentColor.opacity(0.25) : Color.primary.opacity(0.04)))
+                        }.buttonStyle(.plain)
+                    }
+                }
+            }
+            HStack {
+                Button("Use Safari's Look") {
+                    SettingsStore.shared.update { s in if let i = s.profiles.firstIndex(where: { $0.id == profile.id }) { s.profiles[i].custom = false } }
+                    ProfileRegistry.shared.syncFromSafari()
+                    dismiss()
+                }
+                .disabled(!current.custom)
                 Spacer()
-                if profile.custom {
-                    ColorPicker("", selection: Binding(get: { Color(hex: profile.color) }, set: { c in update { $0.color = c.hexString } }), supportsOpacity: false)
-                        .labelsHidden()
-                }
-                Toggle("Customize", isOn: Binding(get: { profile.custom }, set: { v in
-                    update { $0.custom = v }
-                    if !v { ProfileRegistry.shared.syncFromSafari() }
-                }))
-                .toggleStyle(.switch).controlSize(.small)
-                .help("Use your own name, icon and color for this profile instead of Safari's.")
-                Toggle("Show", isOn: Binding(get: { !profile.hidden }, set: { v in update { $0.hidden = !v } }))
-                    .labelsHidden().help("Show in the picker")
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
         }
-        .padding(.vertical, 2)
+        .padding(16)
+        .frame(width: 320)
     }
 }
 
@@ -530,6 +633,8 @@ struct SharedSiteSection: View {
     let profiles: [ProfileConfig]
     var conflicts: [String] = []
     @State private var syncing = false
+    /// Briefly shown after a manual sync: true = shared, false = needs attention.
+    @State private var flash: Bool?
 
     private func update(_ f: @escaping (inout SharedSite) -> Void) {
         SettingsStore.shared.update { s in if let i = s.sharing.firstIndex(where: { $0.id == site.id }) { f(&s.sharing[i]) } }
@@ -537,18 +642,10 @@ struct SharedSiteSection: View {
 
     var body: some View {
         Section {
-            HStack {
-                TextField("Domain", text: Binding(get: { site.domain }, set: { v in update { $0.domain = v.lowercased().trimmingCharacters(in: .whitespaces) } }))
-                    .textFieldStyle(.roundedBorder).frame(maxWidth: 220)
-                Toggle("Share", isOn: Binding(get: { site.enabled }, set: { v in update { $0.enabled = v } }))
-                Spacer()
-                Button(syncing ? "Syncing…" : "Sync Now") {
-                    syncing = true
-                    Hub.shared.queue.async { SessionSharing.shared.sync(site.id) { _ in DispatchQueue.main.async { syncing = false } } }
-                }.disabled(!site.enabled || syncing)
-                Button(role: .destructive) { SettingsStore.shared.update { s in s.sharing.removeAll { $0.id == site.id } } } label: { Image(systemName: "trash") }
-                    .buttonStyle(.borderless)
+            Toggle(isOn: Binding(get: { site.enabled }, set: { v in update { $0.enabled = v } })) {
+                Text("Share this login").font(.body.weight(.medium))
             }
+            TextField("Website", text: Binding(get: { site.domain }, set: { v in update { $0.domain = v.lowercased().trimmingCharacters(in: .whitespaces) } }))
             TextField("Also includes (comma separated)", text: Binding(get: { site.extraDomains.joined(separator: ", ") }, set: { v in
                 update { $0.extraDomains = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty } }
             }))
@@ -577,12 +674,113 @@ struct SharedSiteSection: View {
                 Label("\(conflicts.joined(separator: ", ")) also receive\(conflicts.count == 1 ? "s" : "") this website from another entry. Give each entry different targets.", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.orange)
             }
-            if let r = site.lastResult {
-                Text(r + (site.lastSync.map { " (\(Date(timeIntervalSince1970: $0).formatted(date: .omitted, time: .shortened)))" } ?? ""))
-                    .font(.caption).foregroundStyle(.secondary)
+            HStack(alignment: .center, spacing: 10) {
+                if let r = site.lastResult {
+                    let ok = r.hasPrefix("Shared with") && !r.contains("Problem")
+                    Label {
+                        Text(r + (site.lastSync.map { " · \(Date(timeIntervalSince1970: $0).formatted(date: .omitted, time: .shortened))" } ?? ""))
+                            .fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: ok ? "checkmark.circle.fill" : r.contains("Problem") ? "exclamationmark.triangle.fill" : "clock")
+                            .foregroundStyle(ok ? Color.green : r.contains("Problem") ? Color.orange : Color.secondary)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                } else {
+                    Text(site.enabled ? "Not synced yet" : "Sharing is off").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    syncing = true
+                    flash = nil
+                    Hub.shared.queue.async {
+                        SessionSharing.shared.sync(site.id) { result in
+                            DispatchQueue.main.async {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                    syncing = false
+                                    flash = result.hasPrefix("Shared with") && !result.contains("Problem")
+                                }
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { withAnimation { flash = nil } }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        if syncing {
+                            ProgressView().controlSize(.small)
+                        } else if let ok = flash {
+                            Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                .foregroundStyle(ok ? Color.green : Color.orange)
+                                .transition(.scale.combined(with: .opacity))
+                        }
+                        Text(syncing ? "Syncing…" : flash == true ? "Synced" : flash == false ? "Not Synced" : "Sync Now")
+                    }
+                    .frame(minWidth: 96)
+                }
+                .disabled(!site.enabled || syncing)
+                Button(role: .destructive) { SettingsStore.shared.update { s in s.sharing.removeAll { $0.id == site.id } } } label: { Image(systemName: "trash") }
+                    .buttonStyle(.borderless)
+                    .help("Remove this website")
             }
+            .padding(.vertical, 2)
+            .background(RoundedRectangle(cornerRadius: 8).fill(flash == nil ? Color.clear : (flash == true ? Color.green : Color.orange).opacity(0.10)).padding(-4))
+            .animation(.easeOut(duration: 0.4), value: flash)
         } header: {
             Text(site.domain.isEmpty ? "Website" : site.domain)
+        }
+    }
+}
+
+// MARK: - Shared history
+
+struct HistoryPane: View {
+    @ObservedObject private var store = SettingsStore.shared
+    @ObservedObject private var history = HistoryStore.shared
+    @State private var confirmClear = false
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Remember pages from all Safari profiles", isOn: setting({ $0.history.enabled }, { $0.history.enabled = $1 }))
+                HStack {
+                    Text("Search shortcut")
+                    Spacer()
+                    Toggle("", isOn: setting({ $0.history.hotkeyEnabled }, { $0.history.hotkeyEnabled = $1 })).labelsHidden()
+                    Text(HotKey.describe(keyCode: store.settings.history.hotkeyKeyCode, modifiers: store.settings.history.hotkeyModifiers))
+                        .font(.system(.body, design: .rounded).weight(.medium)).foregroundStyle(.secondary)
+                    Button("Search…") { HistoryPanelController.shared.toggle() }
+                }
+                Picker("Keep pages for", selection: setting({ $0.history.retentionDays }, { $0.history.retentionDays = $1 })) {
+                    Text("1 week").tag(7)
+                    Text("1 month").tag(30)
+                    Text("3 months").tag(90)
+                    Text("1 year").tag(365)
+                }
+            } footer: {
+                Text("Safari keeps a separate history for each profile and doesn't let extensions read or change it. Orbit therefore keeps its own history of the pages you open in any profile, so you can find a page from University while you're in Personal (⌃⌥H). Return opens it in your current profile, ⌘Return in the profile you saw it in. Private windows are never recorded; everything stays on this Mac and the AI agent can't read it.")
+            }
+            Section("Don't record") {
+                ForEach(store.settings.listedProfiles) { p in
+                    Toggle(isOn: Binding(get: { store.settings.history.excludedProfiles.contains(p.id) }, set: { v in
+                        SettingsStore.shared.update { s in
+                            if v { if !s.history.excludedProfiles.contains(p.id) { s.history.excludedProfiles.append(p.id) } } else { s.history.excludedProfiles.removeAll { $0 == p.id } }
+                        }
+                    })) { Label(p.name, systemImage: p.symbol) }
+                }
+            }
+            Section {
+                HStack {
+                    Text("\(history.count) pages stored")
+                    Spacer()
+                    Button("Clear Orbit History…", role: .destructive) { confirmClear = true }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .confirmationDialog("Clear Orbit's shared history?", isPresented: $confirmClear) {
+            Button("Clear History", role: .destructive) { HistoryStore.shared.clear() }
+        } message: {
+            Text("This removes the pages Orbit remembered. Safari's own history isn't affected.")
         }
     }
 }
@@ -645,6 +843,11 @@ struct AgentPane: View {
                 Text("Computer Access")
             } footer: {
                 Text("Enforced by Orbit, not by the AI model. Reading files inside allowed folders doesn't ask (unless you chose “Ask before every action”); creating, editing and moving files asks unless you chose “Approve for me” — and always asks in chats that have read websites. Moving to the Trash and shell commands always ask. Credentials (SSH keys, Keychains, browser data) are never available. After a chat read your files, it asks before sending anything to a website.")
+            }
+            Section {
+                Toggle("One chat history for all Safari profiles", isOn: setting({ $0.agent.sharedHistory }, { $0.agent.sharedHistory = $1 }))
+            } footer: {
+                Text("Chats started in any profile appear in every profile's sidebar, marked with the profile they came from. The agent always works in the profile where you continue a chat.")
             }
             Section("Browser Access") {
                 Text("Choose per chat in the Safari panel (shield menu): this tab only, all tabs in this window, or all windows and profiles. Sensitive actions such as submitting forms or closing tabs ask first.")

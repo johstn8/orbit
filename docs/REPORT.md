@@ -86,6 +86,21 @@ The prompt-free real-Safari checks verify:
 4. **Picker did nothing for sleeping profiles:** it relied on the profile's extension. It now uses Safari's UI, and activates Safari via AX `frontmost` (plain activation from a background app is ignored by macOS 14+).
 5. **Agent glow on test pages:** test-driver tool runs no longer show "Agent is working".
 
+## Bugs found in the third round
+
+1. **Shared logins didn't arrive** (ChatGPT not signed in in Universität, although the sync reported success). The cookie API without `storeId` used a store the profile's websites don't read. Orbit now writes into the store listed with the profile's tabs and verifies by reading back.
+   - Measured after the fix: Universität's real store went from 16 to 194 chatgpt.com cookies.
+   - All five shared sites reported "Shared with Universität".
+   - The stray copies in the unused store went from 189 to 3.
+2. **Logins only synced while both profiles were awake.** Each extension sleeps ~30 s after use. Orbit now keeps the source's last login in memory (12 h) and syncs a target when you use its window.
+3. **One cookie per site refused:** Safari rejects SameSite=None on non-Secure cookies. Orbit retries without SameSite, and a target counts as shared unless a session or auth cookie is missing.
+4. **The default profile didn't reconnect after updates:** a hung native message blocked all reconnects. Fixed with timeouts. After the fix, Personal connected within 2 s of the update.
+5. **No feedback in Settings:**
+   - "Sync Now" now shows progress and the result.
+   - The profile list shows "Updated HH:MM" with a refresh button that confirms "Up to date".
+   - Profile rows have labeled controls ("In Picker", "Customize…" with an editor popover) instead of two unlabeled switches.
+6. **Safari's profile colors** weren't recognized. They now come from `ProfileColor` (with Full Disk Access).
+
 ## Remaining limitations
 
 - **Profile identity and names:**
@@ -94,7 +109,7 @@ The prompt-free real-Safari checks verify:
   - Names and icons need Accessibility; colors need Full Disk Access (otherwise Orbit's colors). Icons are known once a window of the profile has been seen.
 - **Reachability:** a profile is reachable while its extension instance runs. Without Accessibility, a profile with no windows can't be opened by Orbit, and links then open in Safari normally with a notice.
 - **Typed URLs:** stopping relies on a race of about 20–30 ms. If the new page commits first, Orbit goes back. Pages that aren't bfcache-eligible are then reloaded rather than restored. Form POSTs to routed URLs are re-opened as plain GET URLs in the target profile.
-- **Shared logins:** this is a cookie copy, not a protocol-level session share.
+- **Shared logins:** this is a cookie copy, not a protocol-level session share. A target receives the login only while it's in use, because Safari doesn't name its cookie store otherwise.
   - Device-bound sessions, passkey-only sites, CHIPS-partitioned cookies and sites that invalidate a session used from two places may not work.
   - Sign-out isn't mirrored.
   - A target updates only while its profile runs.

@@ -309,7 +309,8 @@ final class Hub {
     }
 
     private func conversationList(for profile: String?) -> [JSONObject] {
-        store.list().filter { profile == nil || $0.profileId == nil || $0.profileId == profile }.map { $0.summaryJSON() }
+        let shared = SettingsStore.shared.current.agent.sharedHistory
+        return store.list().filter { shared || profile == nil || $0.profileId == nil || $0.profileId == profile }.map { $0.summaryJSON() }
     }
 
     /// Request/response call into one extension instance (e.g. open a URL in that profile).
@@ -341,10 +342,11 @@ final class Hub {
     }
 
     private func settingsChanged(_ old: AppSettings, _ new: AppSettings) {
-        if old.routing != new.routing || old.sharing != new.sharing || old.profiles != new.profiles || old.agent.computerAccess != new.agent.computerAccess {
+        if old.routing != new.routing || old.sharing != new.sharing || old.profiles != new.profiles || old.agent.computerAccess != new.agent.computerAccess || old.history != new.history {
             pushConfig()
         }
         if old.sharing != new.sharing { SessionSharing.shared.settingsChanged(old.sharing, new.sharing) }
+        if old.agent.sharedHistory != new.agent.sharedHistory { sendConversations() }
     }
 
     // MARK: events from extension instances
@@ -356,9 +358,12 @@ final class Hub {
         switch name {
         case "window_focused":
             instances[profile]?.lastFocused = Date()
+            SessionSharing.shared.profileActive(profile)
             DispatchQueue.main.async { ProfileRegistry.shared.profileFocused(profile) }
         case "window_created":
             DispatchQueue.main.async { ProfileRegistry.shared.windowCreated(profile) }
+        case "visit":
+            HistoryStore.shared.add(profileId: profile, url: data["url"] as? String ?? "", title: data["title"] as? String ?? "")
         case "cookies_changed":
             SessionSharing.shared.cookiesChanged(profile: profile, domain: data["domain"] as? String ?? "")
         default:
@@ -466,6 +471,13 @@ final class Hub {
                 if let v = p["allowCommands"] as? Bool { s.agent.allowCommands = v }
             }
             reply(.success(["ok": true]))
+        case "debug.history_forget":
+            guard c.role == "driver", let host = p["host"] as? String else { return reply(.failure(AgentError("forbidden", "Not allowed."))) }
+            HistoryStore.shared.forget(host: host)
+            reply(.success(["ok": true]))
+        case "debug.safari_db":
+            guard c.role == "driver" else { return reply(.failure(AgentError("forbidden", "Not allowed."))) }
+            reply(.success(SafariProfileStore.describeSchema()))
         case "debug.focus_profile", "debug.safari_profiles":
             // Local test driver only.
             guard c.role == "driver" else { return reply(.failure(AgentError("forbidden", "Not allowed."))) }

@@ -610,7 +610,10 @@ function History({ s, done }: { s: PanelState; done: () => void }) {
                 <span className={`prov-dot ${c.provider}`} />
                 <div className="row-text">
                   <div className="row-title">{c.title || "Untitled"}</div>
-                  <div className="row-sub">{c.provider === "claude" ? "Claude" : "ChatGPT"} · {new Date(c.updatedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</div>
+                  <div className="row-sub">
+                    {c.provider === "claude" ? "Claude" : "ChatGPT"} · {new Date(c.updatedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+                    {c.profileId && s.profile && c.profileId !== s.profile.id && <> · <span className="row-profile">{s.profiles?.find((p) => p.id === c.profileId)?.name || "other profile"}</span></>}
+                  </div>
                 </div>
                 <button className="ghost-icon del" title="Delete" onClick={(e) => { e.stopPropagation(); send({ type: "delete_conversation", id: c.id }); }}>{I.trash}</button>
               </div>

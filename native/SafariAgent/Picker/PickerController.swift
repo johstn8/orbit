@@ -170,27 +170,39 @@ final class PickerController: NSObject, NSWindowDelegate {
 /// Global keyboard shortcut via Carbon hot keys (no Accessibility permission needed).
 final class HotKey {
     static let shared = HotKey()
-    private var ref: EventHotKeyRef?
+    private var refs: [UInt32: EventHotKeyRef] = [:]
     private var handlerInstalled = false
-    var onPress: (() -> Void)?
+    /// id 1 = profile picker, id 2 = history search.
+    var handlers: [UInt32: () -> Void] = [:]
+    var onPress: (() -> Void)? {
+        get { handlers[1] }
+        set { handlers[1] = newValue }
+    }
 
-    func register(keyCode: UInt32, modifiers: UInt32) {
-        unregister()
+    func register(keyCode: UInt32, modifiers: UInt32) { register(id: 1, keyCode: keyCode, modifiers: modifiers) }
+    func unregister() { unregister(id: 1) }
+
+    func register(id: UInt32, keyCode: UInt32, modifiers: UInt32) {
+        unregister(id: id)
         if !handlerInstalled {
             var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-            InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
-                DispatchQueue.main.async { HotKey.shared.onPress?() }
+            InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
+                var hk = EventHotKeyID()
+                GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &hk)
+                let which = hk.id
+                DispatchQueue.main.async { HotKey.shared.handlers[which]?() }
                 return noErr
             }, 1, &spec, nil, nil)
             handlerInstalled = true
         }
-        let id = EventHotKeyID(signature: OSType(0x4F52_4254), id: 1) // "ORBT"
-        RegisterEventHotKey(keyCode, modifiers, id, GetApplicationEventTarget(), 0, &ref)
+        var ref: EventHotKeyRef?
+        let hid = EventHotKeyID(signature: OSType(0x4F52_4254), id: id) // "ORBT"
+        RegisterEventHotKey(keyCode, modifiers, hid, GetApplicationEventTarget(), 0, &ref)
+        if let ref { refs[id] = ref }
     }
 
-    func unregister() {
-        if let ref { UnregisterEventHotKey(ref) }
-        ref = nil
+    func unregister(id: UInt32) {
+        if let ref = refs.removeValue(forKey: id) { UnregisterEventHotKey(ref) }
     }
 
     static func carbonModifiers(_ f: NSEvent.ModifierFlags) -> UInt32 {

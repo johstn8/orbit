@@ -65,6 +65,17 @@ final class SessionSharing {
         }
     }
 
+    /// You're using a window of this profile: Safari now tells its cookie store, so bring
+    /// logins it receives up to date (at most every 10 minutes per site, unless the last try failed).
+    func profileActive(_ profile: String) {
+        let s = SettingsStore.shared.current
+        let now = Date().timeIntervalSince1970
+        for site in s.sharing where site.enabled && targets(site, settings: s).contains(profile) {
+            let ok = (site.lastResult ?? "").hasPrefix("Shared with") && !(site.lastResult ?? "").contains("will update")
+            if !ok || now - (site.lastSync ?? 0) > 600 { schedule(site.id, delay: 1.5) }
+        }
+    }
+
     private func schedule(_ siteId: String, delay: Double) {
         pending[siteId]?.cancel()
         let w = DispatchWorkItem { [weak self] in self?.sync(siteId, completion: nil) }
@@ -86,51 +97,97 @@ final class SessionSharing {
 
     // MARK: sync
 
+    /// The source profile's last exported login per site, kept in memory only (never on
+    /// disk), so target profiles can be updated while the source profile's extension sleeps.
+    private var cache: [String: (cookies: [JSONObject], at: Date, source: String)] = [:]
+    private static let cacheLifetime: TimeInterval = 12 * 3600
+
     func sync(_ siteId: String, completion: ((String) -> Void)?) {
         let s = SettingsStore.shared.current
         guard let site = s.sharing.first(where: { $0.id == siteId }), site.enabled else { completion?("Sharing is off."); return }
         let doms = domains(site)
-        let targetIds = targets(site, settings: s)
+        let sourceName = s.profile(site.sourceProfileId)?.name ?? "the source profile"
+        let fromCache = { [weak self] () -> Bool in
+            guard let self, let c = self.cache[site.id], c.source == site.sourceProfileId, Date().timeIntervalSince(c.at) < Self.cacheLifetime else { return false }
+            self.distribute(site, c.cookies, settings: s, completion: completion)
+            return true
+        }
         guard hub.instances[site.sourceProfileId] != nil else {
-            finish(site, "Waiting for the \(s.profile(site.sourceProfileId)?.name ?? "source") profile to be open in Safari.", completion)
+            if fromCache() { return }
+            let had = targets(site, settings: s).filter { site.syncedTargets[$0] != nil }.compactMap { s.profile($0)?.name }.sorted()
+            finish(site, had.isEmpty ? "Waiting for \(sourceName) to be in use in Safari." : "Shared with \(had.joined(separator: ", ")). New changes follow when \(sourceName) is in use.", completion)
             return
         }
         hub.callInstance(site.sourceProfileId, "cookies_export", ["domains": doms], timeout: 10) { [weak self] r in
             guard let self else { return }
             guard case .success(let v) = r, let o = v as? JSONObject, let cookies = o["cookies"] as? [JSONObject] else {
-                if case .failure(let e) = r { self.finish(site, "Couldn't read the login: \(e.message)", completion) }
+                if fromCache() { return }
+                if case .failure(let e) = r { self.finish(site, "Couldn't read the login in \(sourceName): \(e.message)", completion) }
                 else { self.finish(site, "Couldn't read the login.", completion) }
                 return
             }
             let excluded = Set(site.excludedCookies.map { $0.lowercased() })
             let filtered = cookies.filter { !excluded.contains(($0["name"] as? String ?? "").lowercased()) }
             if filtered.isEmpty {
-                self.finish(site, "No login found in \(s.profile(site.sourceProfileId)?.name ?? "the source profile"). Sign in there first.", completion)
+                self.finish(site, "No login found in \(sourceName). Sign in there first.", completion)
                 return
             }
-            let group = DispatchGroup()
-            var done: [String] = []
-            var waiting: [String] = []
-            for t in targetIds {
-                let name = s.profile(t)?.name ?? "Profile"
-                guard self.hub.instances[t] != nil else { waiting.append(name); continue }
-                group.enter()
-                self.hub.callInstance(t, "cookies_import", ["domains": doms, "cookies": filtered, "excluded": Array(excluded)], timeout: 15) { r in
-                    if case .success = r { done.append(name) } else { waiting.append(name) }
-                    group.leave()
-                }
-            }
-            group.notify(queue: self.hub.queue) {
-                var msg = done.isEmpty ? "" : "Shared with \(done.sorted().joined(separator: ", "))."
-                if !waiting.isEmpty { msg += (msg.isEmpty ? "" : " ") + "Will update \(waiting.sorted().joined(separator: ", ")) when open in Safari." }
-                self.finish(site, msg.isEmpty ? "No target profiles." : msg, completion)
-            }
+            self.cache[site.id] = (filtered, Date(), site.sourceProfileId)
+            self.distribute(site, filtered, settings: s, completion: completion)
         }
     }
 
-    private func finish(_ site: SharedSite, _ result: String, _ completion: ((String) -> Void)?) {
+    private func distribute(_ site: SharedSite, _ filtered: [JSONObject], settings s: AppSettings, completion: ((String) -> Void)?) {
+        let doms = domains(site)
+        let excluded = Set(site.excludedCookies.map { $0.lowercased() })
+        let targetIds = targets(site, settings: s)
+        let group = DispatchGroup()
+        var done: [String] = []
+        var doneIds: [String] = []
+        var waiting: [String] = []
+        var problems: [String] = []
+        for t in targetIds {
+            let name = s.profile(t)?.name ?? "Profile"
+            guard hub.instances[t] != nil else {
+                // Asleep now, but it already has this login from an earlier sync.
+                if site.syncedTargets[t] != nil { done.append(name) } else { waiting.append(name) }
+                continue
+            }
+            group.enter()
+            hub.callInstance(t, "cookies_import", ["domains": doms, "cookies": filtered, "excluded": Array(excluded)], timeout: 20) { r in
+                switch r {
+                case .success(let v):
+                    // Count it only when the target's store really holds the source's values now.
+                    let o = v as? JSONObject ?? [:]
+                    let verified = o["verified"] as? Int ?? 0, expected = o["expected"] as? Int ?? 0
+                    let missing = o["missing"] as? [String] ?? []
+                    // A login is shared when everything arrived, or only minor cookies (not
+                    // session/auth ones) were refused by Safari.
+                    let critical = missing.filter { n in ["session", "auth", "token", "sid", "login", "user"].contains { n.lowercased().contains($0) } }
+                    if expected == 0 || verified >= expected { done.append(name); doneIds.append(t) }
+                    else if critical.isEmpty && verified * 10 >= expected * 9 { done.append(name); doneIds.append(t) }
+                    else { problems.append("\(name): \(verified) of \(expected) cookies arrived (missing \(missing.prefix(3).joined(separator: ", ")))") }
+                case .failure(let e):
+                    if e.message.contains("no open tab") {
+                        if site.syncedTargets[t] != nil { done.append(name) } else { waiting.append(name) }
+                    } else { problems.append("\(name): \(e.message)") }
+                }
+                group.leave()
+            }
+        }
+        group.notify(queue: hub.queue) {
+            var parts: [String] = []
+            if !done.isEmpty { parts.append("Shared with \(done.sorted().joined(separator: ", ")).") }
+            if !problems.isEmpty { parts.append("Problem — \(problems.sorted().joined(separator: "; ")).") }
+            if !waiting.isEmpty { parts.append("\(waiting.sorted().joined(separator: ", ")) will update when \(waiting.count == 1 ? "it's" : "they're") in use in Safari.") }
+            self.finish(site, parts.isEmpty ? "No target profiles." : parts.joined(separator: " "), syncedNow: doneIds, completion)
+        }
+    }
+
+    private func finish(_ site: SharedSite, _ result: String, syncedNow: [String] = [], _ completion: ((String) -> Void)?) {
         SettingsStore.shared.update { s in
             if let i = s.sharing.firstIndex(where: { $0.id == site.id }) {
+                for t in syncedNow { s.sharing[i].syncedTargets[t] = Date().timeIntervalSince1970 }
                 s.sharing[i].lastSync = Date().timeIntervalSince1970
                 s.sharing[i].lastResult = result
             }

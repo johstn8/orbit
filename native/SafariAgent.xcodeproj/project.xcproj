@@ -30,6 +30,7 @@
           "children": [
             { "path": "PickerController.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
             { "path": "PickerDesigns.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
+            { "path": "HistoryPanel.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
           ],
         },
         {
@@ -48,6 +49,7 @@
             { "path": "Routing.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
             { "path": "SessionSharing.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
             { "path": "SafariDockWatcher.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
+            { "path": "HistoryStore.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
           ],
         },
         {

@@ -60,6 +60,7 @@ export interface ConversationSummary {
   provider: ProviderId;
   model?: string;
   updatedAt: number;
+  profileId?: string;
 }
 
 export interface Conversation extends ConversationSummary {
@@ -125,6 +126,8 @@ export interface InstanceConfig {
   };
   sharing: { id: string; domain: string; extraDomains: string[]; sourceProfileId: string; targets: string[]; excludedCookies: string[] }[];
   computerAccess: ComputerAccess;
+  /** Report visited pages for Orbit's shared history (never in private windows). */
+  recordHistory?: boolean;
 }
 
 export interface Settings {
@@ -160,6 +163,8 @@ export interface PanelState {
   sidePanelMode: "native" | "page" | "window";
   /** This Safari profile, as named in the Orbit app. */
   profile?: ProfileInfo;
+  /** All Safari profiles (to label chats from other profiles in the shared history). */
+  profiles?: ProfileInfo[];
   agent: AgentAccess;
 }
 

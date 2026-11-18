@@ -90,6 +90,8 @@ struct SharedSite: Codable, Identifiable, Equatable, Hashable {
     var enabled: Bool = true
     var lastSync: Double?
     var lastResult: String?
+    /// When each target profile last received this login successfully.
+    var syncedTargets: [String: Double] = [:]
 
     init(id: String = UUID().uuidString, domain: String, extraDomains: [String] = [], sourceProfileId: String, targets: [String] = [], excludedCookies: [String] = [], enabled: Bool = true) {
         self.id = id; self.domain = domain; self.extraDomains = extraDomains; self.sourceProfileId = sourceProfileId
@@ -106,6 +108,7 @@ struct SharedSite: Codable, Identifiable, Equatable, Hashable {
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
         lastSync = try c.decodeIfPresent(Double.self, forKey: .lastSync)
         lastResult = try c.decodeIfPresent(String.self, forKey: .lastResult)
+        syncedTargets = try c.decodeIfPresent([String: Double].self, forKey: .syncedTargets) ?? [:]
     }
 }
 
@@ -115,6 +118,8 @@ struct AgentSettings: Codable, Equatable {
     var folders: [String] = []
     /// In full access: allow the agent to propose shell commands (each one needs approval).
     var allowCommands = false
+    /// One Orbit chat history for all Safari profiles (otherwise each profile keeps its own).
+    var sharedHistory = true
 }
 
 struct PickerSettings: Codable, Equatable {
@@ -124,6 +129,17 @@ struct PickerSettings: Codable, Equatable {
     var hotkeyEnabled = true
     var hotkeyKeyCode: UInt32 = 35        // P
     var hotkeyModifiers: UInt32 = 0x0800 | 0x1000 // optionKey | controlKey (Carbon)
+}
+
+/// Orbit's shared history (all Safari profiles), searchable from a global shortcut.
+struct HistorySettings: Codable, Equatable {
+    var enabled = true
+    var retentionDays = 90
+    /// Profiles whose visits are never recorded.
+    var excludedProfiles: [String] = []
+    var hotkeyEnabled = true
+    var hotkeyKeyCode: UInt32 = 4          // H
+    var hotkeyModifiers: UInt32 = 0x0800 | 0x1000 // optionKey | controlKey
 }
 
 /// What happens when Safari has no window and you click its Dock icon.
@@ -137,6 +153,7 @@ struct SafariSettings: Codable, Equatable {
 struct AppSettings: Codable, Equatable {
     var profiles: [ProfileConfig] = []
     var safari = SafariSettings()
+    var history = HistorySettings()
     var picker = PickerSettings()
     var routing = RoutingSettings()
     var sharing: [SharedSite] = []
@@ -244,6 +261,7 @@ extension AppSettings {
             ],
             "sharing": sites,
             "computerAccess": agent.computerAccess,
+            "recordHistory": history.enabled && !history.excludedProfiles.contains(profileId),
         ]
     }
 }

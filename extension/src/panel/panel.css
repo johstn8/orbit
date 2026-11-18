@@ -363,3 +363,4 @@ textarea::placeholder { color: var(--fg-3); }
   .hljs-title, .hljs-section, .hljs-type { color: #dabaff; }
   .hljs-variable, .hljs-params { color: #a3b1bf; }
 }
+.row-profile { color: var(--accent); font-weight: 500; }

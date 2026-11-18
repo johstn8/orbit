@@ -72,6 +72,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         SafariDockWatcher.shared.start()
         setupStatusItem()
         HotKey.shared.onPress = { [weak self] in self?.showPicker() }
+        HotKey.shared.handlers[2] = { HistoryPanelController.shared.toggle() }
+        SettingsStore.shared.$settings
+            .map(\.history)
+            .removeDuplicates()
+            .sink { h in
+                if h.enabled && h.hotkeyEnabled { HotKey.shared.register(id: 2, keyCode: h.hotkeyKeyCode, modifiers: h.hotkeyModifiers) } else { HotKey.shared.unregister(id: 2) }
+            }
+            .store(in: &cancellables)
         SettingsStore.shared.$settings
             .map(\.picker)
             .removeDuplicates()
@@ -126,6 +134,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         picker.target = self
         if s.picker.hotkeyEnabled { picker.toolTip = HotKey.describe(keyCode: s.picker.hotkeyKeyCode, modifiers: s.picker.hotkeyModifiers) }
         menu.addItem(picker)
+        let hist = NSMenuItem(title: "Search History…", action: #selector(showHistoryAction), keyEquivalent: "")
+        hist.target = self
+        if s.history.hotkeyEnabled { hist.toolTip = HotKey.describe(keyCode: s.history.hotkeyKeyCode, modifiers: s.history.hotkeyModifiers) }
+        menu.addItem(hist)
         if !s.pickerProfiles.isEmpty {
             menu.addItem(.separator())
             let header = NSMenuItem(title: "Open Profile", action: nil, keyEquivalent: "")
@@ -175,6 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc func showPickerAction() { DispatchQueue.main.async { self.showPicker() } }
+    @objc func showHistoryAction() { DispatchQueue.main.async { HistoryPanelController.shared.toggle() } }
     @objc func focusProfileAction(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         focus(profile: id)

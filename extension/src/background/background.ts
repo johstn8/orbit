@@ -92,6 +92,7 @@ function broadcast(immediate = false) {
     state.connection = helper.state;
     state.connectionDetail = helper.detail || undefined;
     state.profile = instanceConfig?.profiles.find((p) => p.id === instanceConfig?.profileId);
+    state.profiles = instanceConfig?.profiles;
     const delivered: TabPanelState[] = [];
     for (const p of ports) {
       const tabId = p.sender?.tab?.id;
@@ -132,6 +133,7 @@ routing.start();
 const sessions = new SessionSync({
   config: () => instanceConfig,
   sendEvent: (name, data) => sendEvent(name, data),
+  isDefaultProfile: () => !helper.profileKeyPresent,
 });
 sessions.start();
 
@@ -302,6 +304,8 @@ async function handleCall(msg: any): Promise<any> {
       lastCreated = null;
       return { ok: true };
     }
+    case "cookies_diagnose":
+      return sessions.diagnose(String(p.domain || "chatgpt.com"));
     case "cookies_export":
       return sessions.exportCookies((p.domains || []).map(String));
     case "cookies_import":
@@ -551,6 +555,32 @@ browser.windows?.onRemoved?.addListener((id: number) => {
 browser.windows?.getLastFocused?.({ windowTypes: ["normal"] }).then((w: any) => {
   if (w?.id !== undefined && lastFocusedWindowId === null) lastFocusedWindowId = w.id;
 }).catch(() => {});
+
+// ---------------- shared history (Orbit keeps it; Safari has no history API) ----------------
+
+const visitQueue: { url: string; title: string }[] = [];
+const lastVisit = new Map<number, string>();
+browser.tabs.onUpdated.addListener((tabId: number, info: any, tab: any) => {
+  if (info.status !== "complete" && !info.title) return;
+  if (!tab || tab.incognito || !/^https?:/i.test(tab.url || "")) return;
+  if (instanceConfig && instanceConfig.recordHistory === false) return;
+  const key = `${tab.url}|${tab.title || ""}`;
+  if (lastVisit.get(tabId) === key) return;
+  lastVisit.set(tabId, key);
+  visitQueue.push({ url: tab.url, title: tab.title || "" });
+  if (visitQueue.length > 300) visitQueue.splice(0, visitQueue.length - 300);
+  flushVisits();
+});
+browser.tabs.onRemoved.addListener((tabId: number) => lastVisit.delete(tabId));
+let flushTimer: any = null;
+function flushVisits() {
+  clearTimeout(flushTimer);
+  flushTimer = setTimeout(() => {
+    helper.ensure().then(() => {
+      while (visitQueue.length) helper.send({ type: "event", name: "visit", data: visitQueue.shift() });
+    }).catch(() => {});
+  }, 800);
+}
 
 // Wake up regularly so the Orbit app can reach this profile (open links, routing, shared logins).
 browser.alarms?.create?.("orbit-keepalive", { periodInMinutes: 1 });
