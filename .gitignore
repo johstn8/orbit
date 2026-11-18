@@ -1,0 +1,10 @@
+node_modules/
+extension/dist/
+build/
+tests/e2e/results/
+.DS_Store
+# Third-party reference archive (read-only, not ours to redistribute)
+Chrome-Extensions/
+# Xcode user state
+xcuserdata/
+*.xcuserstate

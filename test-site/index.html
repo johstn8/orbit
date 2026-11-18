@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Agent Test Lab</title>
+<style>
+  body { font: 16px/1.5 -apple-system, system-ui, sans-serif; max-width: 760px; margin: 30px auto; padding: 0 20px; color: #222; }
+  fieldset { border: 1px solid #ccc; border-radius: 8px; margin: 18px 0; padding: 12px 16px; }
+  label { display: block; margin: 8px 0 2px; }
+  input, select, textarea { font: inherit; padding: 4px 6px; }
+  .status { font-weight: 600; padding: 8px 12px; background: #f2f4ff; border-radius: 6px; }
+  button { font: inherit; padding: 5px 12px; margin-right: 6px; }
+</style>
+<script src="report.js"></script>
+</head>
+<body>
+<header><nav><a href="/docs.html">Documentation</a> · <a href="/pricing.html">Pricing</a></nav></header>
+<main>
+<h1>Agent Test Lab</h1>
+<article>
+  <h2>The Zephyr Valley Water Project</h2>
+  <p>The Zephyr Valley Water Project is a small community initiative that installed 42 rainwater cisterns across
+  the valley in 2025. Its organizers argue that decentralized storage is cheaper than a new reservoir, that it keeps
+  water rights in the hands of local households, and that it reduces flooding during the spring melt.</p>
+  <p>Critics respond that cisterns run dry during long droughts and that maintenance costs fall unevenly on
+  older residents. The project's coordinator, Mirela Okafor, says a shared maintenance fund will address this.</p>
+</article>
+
+<section aria-labelledby="ctl">
+  <h2 id="ctl">Controls</h2>
+  <p class="status" role="status" id="status">Counter: <span id="count">0</span> · Mode: <span id="mode">idle</span></p>
+  <button id="inc" onclick="inc()">Increment counter</button>
+  <button id="activate" onclick="activate()">Activate turbo mode</button>
+</section>
+
+<form id="order" action="/submit" method="get">
+  <fieldset>
+    <legend>Test order form</legend>
+    <label for="name">Full name</label>
+    <input id="name" name="name" autocomplete="name" placeholder="Jane Doe">
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" placeholder="you@example.com">
+    <label for="size">T-shirt size</label>
+    <select id="size" name="size"><option value="">Choose…</option><option value="s">Small</option><option value="m">Medium</option><option value="l">Large</option></select>
+    <label><input type="checkbox" id="newsletter" name="newsletter"> Subscribe to newsletter</label>
+    <label for="notes">Notes</label>
+    <textarea id="notes" name="notes" rows="2"></textarea>
+    <label for="pw">Password</label>
+    <input id="pw" name="pw" type="password" autocomplete="current-password">
+    <p><button type="submit">Place order</button></p>
+  </fieldset>
+</form>
+</main>
+<script>
+  let n = 0;
+  function inc() { n++; document.getElementById("count").textContent = n; report("counter", { value: n }); }
+  function activate() { document.getElementById("mode").textContent = "TURBO-ACTIVE"; report("activated"); }
+  for (const id of ["name", "email", "notes"]) document.getElementById(id).addEventListener("change", (e) => report("field_changed", { field: id, value: e.target.value }));
+  document.getElementById("size").addEventListener("change", (e) => report("field_changed", { field: "size", value: e.target.value }));
+  document.getElementById("newsletter").addEventListener("change", (e) => report("field_changed", { field: "newsletter", value: e.target.checked }));
+</script>
+</body>
+</html>
