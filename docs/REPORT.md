@@ -1,6 +1,6 @@
 # Technical report
 
-Orbit 1.0.0, 2026-11-18. Environment: macOS 27.3, Safari 27.3, Xcode 27.2, Swift 6.4 (Swift 5 mode), Node 24.21, Claude Code 2.1.x.
+Development log from Orbit 1.0.0 to 1.1.2 (November 2026). Environment: macOS 27.3, Safari 27.3, Xcode 27.2, Swift 6.4 (Swift 5 mode), Node 24.21, Claude Code 2.1.x.
 
 Earlier history: 0.1.0 ("Safari Agent") was the AI sidebar alone. Its real-Safari acceptance results were Claude 17/17 and ChatGPT 15/15, recorded on 2026-11-14 and listed at the end.
 
@@ -21,15 +21,15 @@ Earlier history: 0.1.0 ("Safari Agent") was the AI sidebar alone. Its real-Safar
   - Shared logins suggest ChatGPT and Google, allow several entries per site, and warn about overlapping targets.
 - **Fixed** (root causes below): slow initial load, the sidebar disappearing, lost composer focus, laggy resizing, and the composer's website badge (removed).
 
-## Test results (all executed on this Mac; no prompt-sending tests were run)
+## Test results (all executed on the development Mac; no prompt-sending tests were run)
 
 | Suite | Result |
 |---|---|
 | TypeScript unit tests (`cd extension && npm test`) | **50/50 pass**: 26 earlier ones, plus 24 routing-pattern tests from the shared fixture `tests/fixtures/routing-cases.json` |
 | Swift unit tests (`scripts/test-native.sh`) | **105/105 pass**: 47 earlier ones, plus the routing fixture, path policy, tool catalog, settings decoding, profile-name parsing, Safari AX identifiers, placeholder→extension id migration, shared-login conflicts and prompt context. Details below the table |
-| Real cross-profile routing (real Safari, your profiles) | With a temporary rule (test page → Universität), a URL set in a Personal tab via Safari's UI was stopped (`stopped: 1`) and opened in Universität (`routed: 1`). The Personal tab kept its URL. The rule was removed afterwards |
-| Picker focus through Safari's UI | `focus(Quant)` raised Quant's window while Quant's extension was asleep, and `focus(Personal)` brought Personal back (front window checked via AX) |
-| Profiles from Safari | Names, default flag and icons were read from Safari (Personal `person.fill`, Universität `graduationcap.fill`, Quant `bag.fill`); the deleted "Privat" profile disappeared |
+| Real cross-profile routing (real Safari, real profiles) | With a temporary rule (test page → University), a URL set in a Personal tab via Safari's UI was stopped (`stopped: 1`) and opened in University (`routed: 1`). The Personal tab kept its URL. The rule was removed afterwards |
+| Picker focus through Safari's UI | `focus(Work)` raised the Work profile's window while its extension was asleep, and `focus(Personal)` brought Personal back (front window checked via AX) |
+| Profiles from Safari | Names, default flag and icons were read from Safari (e.g. `person.fill`, `graduationcap.fill`, `bag.fill`); a profile deleted in Safari disappeared |
 | Sidebar in a fresh tab | Ready after 24–41 ms (panel confirmed); clean rounded corners (screenshot including the sidebar) |
 | Sidebar in a tab left over from an update | The frame never confirmed; the sidebar was removed and the single reload card shown (screenshot) |
 | Typecheck, Release build, team signing | Pass. `codesign --verify --deep --strict` on the installed `~/Applications/Orbit.app` passes |
@@ -37,7 +37,7 @@ Earlier history: 0.1.0 ("Safari Agent") was the AI sidebar alone. Its real-Safar
 | Navigation-stop experiment (real Safari) | `window.stop()` from `onBeforeNavigate` kept the page and its JS state with server delays of 0/150/600 ms. `declarativeNetRequest` replaced the page with Safari's "blocked by a content blocker" page, and Back did not restore it. A plain navigation + Back restored the state (bfcache) |
 | Routing failure path (real Safari, fake target profile) | The navigation was stopped (`stopped: 1`). Routing failed as expected (profile unreachable, no Accessibility), `failed: 1`, and the fallback ran |
 | Picker designs | Rendered offscreen with `--render-designs` to check layout and placement of all five designs (glass replaced by flat surfaces offscreen). Overlaps found and fixed: the Control Center grid was too wide, the Orbit caption collided with a name, the Arc was too tight, the Pearls highlight was too strong |
-| Claude / ChatGPT agent e2e | **Not re-run**: they consume subscription quota, and you asked to skip them. The provider code paths are unchanged apart from the tool catalog and context lines |
+| Claude / ChatGPT agent e2e | **Not re-run**: they consume subscription quota, so they were skipped on purpose. The provider code paths are unchanged apart from the tool catalog and context lines |
 
 The new Swift tests cover:
 - **Path policy:** symlink escape, `..`, sibling-prefix folders, credential stores, the full-access write limit and the none tier.
@@ -51,10 +51,10 @@ The prompt-free real-Safari checks verify:
 - With no computer access, the tools are refused.
 - A HttpOnly login cookie was exported and re-imported with a changed value.
 
-**Not verified yet**, because it needs your Safari setup:
+**Not verified in 1.0.0** (the cross-profile paths were verified in the later rounds below):
 - **Cross-profile success paths:** opening links in another profile, routing into another profile, shared logins between two real profiles, and the agent with "All windows and profiles". During development only one profile's instance was connected, because the extension had to be turned on in the other profiles first.
-- **Picker Space and display handling, and the Dock-icon action:** these need your mouse and multiple Spaces/displays.
-- **Picker as a live window and the default-browser flow:** these need your mouse and keyboard and the macOS confirmation dialog.
+- **Picker Space and display handling, and the Dock-icon action:** these need manual use with multiple Spaces/displays.
+- **Picker as a live window and the default-browser flow:** these need manual use and the macOS confirmation dialog.
 - **The real Liquid Glass look of the picker:** offscreen snapshots can't render glass.
 
 ## Root causes fixed (sidebar)
@@ -88,9 +88,9 @@ The prompt-free real-Safari checks verify:
 
 ## Bugs found in the third round
 
-1. **Shared logins didn't arrive** (ChatGPT not signed in in Universität, although the sync reported success). The cookie API without `storeId` used a store the profile's websites don't read. Orbit now writes into the store listed with the profile's tabs and verifies by reading back.
-   - Measured after the fix: Universität's real store went from 16 to 194 chatgpt.com cookies.
-   - All five shared sites reported "Shared with Universität".
+1. **Shared logins didn't arrive** (ChatGPT not signed in in a second profile, although the sync reported success). The cookie API without `storeId` used a store the profile's websites don't read. Orbit now writes into the store listed with the profile's tabs and verifies by reading back.
+   - Measured after the fix: the target profile's real store went from 16 to 194 chatgpt.com cookies.
+   - All five shared sites reported "Shared with <profile>".
    - The stray copies in the unused store went from 189 to 3.
 2. **Logins only synced while both profiles were awake.** Each extension sleeps ~30 s after use. Orbit now keeps the source's last login in memory (12 h) and syncs a target when you use its window.
 3. **One cookie per site refused:** Safari rejects SameSite=None on non-Secure cookies. Orbit retries without SameSite, and a target counts as shared unless a session or auth cookie is missing.
@@ -114,10 +114,16 @@ The prompt-free real-Safari checks verify:
 
    Settings › General also shows the Automation status for Safari.
 
+## 1.1.2: public release
+
+- The README is now an install and usage guide for any Mac. The technical overview moved to [ARCHITECTURE.md](ARCHITECTURE.md).
+- Personal details were removed from the docs.
+- `build.sh` now explains missing prerequisites (Node.js, Xcode), and `install.sh` names the next step in Safari.
+
 ## Remaining limitations
 
 - **Profile identity and names:**
-  - Safari didn't provide `SFExtensionProfileKey` here, so ids are per-instance random ids in per-profile storage.
+  - Safari doesn't provide `SFExtensionProfileKey` for the default profile, so its id is are per-instance random ids in per-profile storage.
   - If you clear Safari's extension data for a profile, it appears as a new profile; rename it or forget the old entry in Settings.
   - Names and icons need Accessibility; colors need Full Disk Access (otherwise Orbit's colors). Icons are known once a window of the profile has been seen.
 - **Reachability:** a profile is reachable while its extension instance runs. Without Accessibility, a profile with no windows can't be opened by Orbit, and links then open in Safari normally with a notice.

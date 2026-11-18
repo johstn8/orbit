@@ -477,7 +477,7 @@ final class Hub {
             DispatchQueue.global().async {
                 let auto = Permissions.automation(ask: false)
                 DispatchQueue.main.async {
-                    if p["showNotice"] as? Bool == true { AppDelegate.shared?.notify(.automation("Needed to open the link in “Universität”")) }
+                    if p["showNotice"] as? Bool == true { AppDelegate.shared?.notify(.automation("Needed to open the link in “University”")) }
                     reply(.success(["accessibility": AXIsProcessTrusted(), "automation": String(describing: auto)]))
                 }
             }

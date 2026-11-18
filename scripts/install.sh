@@ -30,3 +30,4 @@ done
 "$LSREGISTER" -f "$DEST/Orbit.app"
 open "$DEST/Orbit.app" --args --background
 echo "Installed: $DEST/Orbit.app"
+echo "Next: in Safari › Settings › Extensions, turn on Orbit (and in each profile's Extensions tab)."

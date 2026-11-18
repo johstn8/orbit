@@ -4,6 +4,14 @@
 set -euo pipefail
 ROOT=${0:A:h:h}
 CONFIG=${1:-Release}
+# Prerequisites, with a clear message instead of a cryptic failure.
+if ! command -v node >/dev/null || ! command -v npm >/dev/null; then
+  echo "Node.js is missing. Install it from https://nodejs.org (or: brew install node), then run this again." >&2; exit 1
+fi
+if [[ "$(xcode-select -p 2>/dev/null)" != *Xcode*.app* ]]; then
+  echo "Xcode is missing or not selected. Install Xcode from the App Store, open it once, then run:" >&2
+  echo "  sudo xcode-select -s /Applications/Xcode.app" >&2; exit 1
+fi
 cd "$ROOT/extension"
 [ -d node_modules ] || npm ci
 npm run --silent typecheck
