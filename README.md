@@ -195,6 +195,10 @@ test-site/   local pages for testing
 docs/        architecture, report, images
 ```
 
+## License
+
+Orbit is released under the [MIT License](LICENSE).
+
 ---
 
 <sub>Orbit is an independent project and isn't affiliated with Apple, Anthropic or OpenAI. Safari is a trademark of Apple Inc.</sub>
