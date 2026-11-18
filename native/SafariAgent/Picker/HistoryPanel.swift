@@ -92,8 +92,8 @@ final class HistorySearchModel: ObservableObject {
         let target = inOriginalProfile ? visit.profileId : (Self.currentProfileId() ?? visit.profileId)
         onClose()
         Task {
-            if case .fallback(let why) = await SafariController.open(url, profileId: target) {
-                await MainActor.run { AppDelegate.shared?.notify(title: "Opened in Safari", body: why) }
+            if case .fallback(let notice) = await SafariController.open(url, profileId: target) {
+                await MainActor.run { AppDelegate.shared?.notify(notice) }
             }
         }
     }

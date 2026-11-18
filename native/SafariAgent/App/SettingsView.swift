@@ -144,6 +144,7 @@ struct GeneralPane: View {
                 }
                 Text("Turn on Orbit in every Safari profile (Safari ▸ Settings ▸ Profiles ▸ Extensions) so it can open links and route websites there. \(registry.connected.count) of \(store.settings.profiles.count) profiles connected right now.")
                     .font(.caption).foregroundStyle(.secondary)
+                AutomationRow()
                 HStack {
                     StatusDot(ok: registry.accessibilityTrusted)
                     VStack(alignment: .leading, spacing: 2) {
@@ -162,6 +163,32 @@ struct GeneralPane: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// "Control Safari" (Apple Events): needed to load a link in a window Orbit just opened.
+struct AutomationRow: View {
+    @State private var status: Permissions.Automation = .unknown
+    var body: some View {
+        HStack {
+            StatusDot(ok: status == .allowed)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(status == .allowed ? "Orbit may control Safari" : status == .denied ? "Orbit may not control Safari" : "Control Safari (optional)")
+                Text("Lets Orbit load a link in a profile window it just opened.").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if status == .denied {
+                Button("Open Settings…") { NSWorkspace.shared.open(Permissions.settingsURL("Privacy_Automation")) }
+            } else if status != .allowed {
+                Button("Allow…") {
+                    Task.detached {
+                        let s = Permissions.automation(ask: true)
+                        await MainActor.run { status = s }
+                    }
+                }
+            }
+        }
+        .onAppear { Task.detached { let s = Permissions.automation(ask: false); await MainActor.run { status = s } } }
     }
 }
 

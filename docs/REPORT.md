@@ -101,6 +101,19 @@ The prompt-free real-Safari checks verify:
    - Profile rows have labeled controls ("In Picker", "Customize…" with an editor popover) instead of two unlabeled switches.
 6. **Safari's profile colors** weren't recognized. They now come from `ProfileColor` (with Full Disk Access).
 
+## Bugs found in the fourth round (1.1.1)
+
+1. **"Couldn't switch profile" blamed Accessibility although it was allowed.** Orbit's status check showed Accessibility allowed and Automation "Safari not running". Safari wasn't open, so its menus and windows couldn't be read.
+   - Orbit now starts Safari, waits until its menus are ready (at most 6 s), and then switches.
+   - Verified: with Safari running, Accessibility and Automation are both allowed, and focusing Personal returned `ok`.
+   - Not verified: the automatic start with Safari closed, because Safari wasn't quit while it was in use.
+2. **Vague problem messages:** each one now names what's missing and where to turn it on, in one or two short lines, with a button that opens the right place:
+   - Privacy & Security › Accessibility or › Automation in System Settings.
+   - Safari's extension settings.
+   - Orbit › Profiles.
+
+   Settings › General also shows the Automation status for Safari.
+
 ## Remaining limitations
 
 - **Profile identity and names:**

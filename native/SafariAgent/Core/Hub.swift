@@ -471,6 +471,16 @@ final class Hub {
                 if let v = p["allowCommands"] as? Bool { s.agent.allowCommands = v }
             }
             reply(.success(["ok": true]))
+        case "debug.permissions":
+            // Local test driver only: permission status, and optionally show a sample notice.
+            guard c.role == "driver" else { return reply(.failure(AgentError("forbidden", "Not allowed."))) }
+            DispatchQueue.global().async {
+                let auto = Permissions.automation(ask: false)
+                DispatchQueue.main.async {
+                    if p["showNotice"] as? Bool == true { AppDelegate.shared?.notify(.automation("Needed to open the link in “Universität”")) }
+                    reply(.success(["accessibility": AXIsProcessTrusted(), "automation": String(describing: auto)]))
+                }
+            }
         case "debug.history_forget":
             guard c.role == "driver", let host = p["host"] as? String else { return reply(.failure(AgentError("forbidden", "Not allowed."))) }
             HistoryStore.shared.forget(host: host)
@@ -495,7 +505,7 @@ final class Hub {
             Task {
                 let r = await SafariController.focus(profileId: id)
                 let front = await MainActor.run { SafariAX.windowProfiles().first?.name }
-                if case .fallback(let why) = r { reply(.success(["ok": false, "why": why, "front": front as Any])) } else { reply(.success(["ok": true, "front": front as Any])) }
+                if case .fallback(let why) = r { reply(.success(["ok": false, "why": why.title, "front": front as Any])) } else { reply(.success(["ok": true, "front": front as Any])) }
             }
         case "debug.call":
             // Test driver: call an extension instance method (e.g. "caps", "windows").

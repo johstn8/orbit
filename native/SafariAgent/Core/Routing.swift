@@ -86,7 +86,7 @@ final class Router {
                 let outcome = await SafariController.open(url, profileId: target, newWindow: p["newWindow"] as? Bool ?? false, openAnywayOnFailure: false)
                 switch outcome {
                 case .done: reply(.success(["ok": true]))
-                case .fallback(let why): reply(.success(["ok": false, "reason": why]))
+                case .fallback(let notice): reply(.success(["ok": false, "reason": notice.title.lowercased()]))
                 }
             }
         case "route.pause":
@@ -144,8 +144,8 @@ final class Router {
     func open(_ url: URL, in profileId: String) {
         recent.append((url.absoluteString, profileId, Date()))
         Task {
-            if case .fallback(let why) = await SafariController.open(url, profileId: profileId) {
-                await MainActor.run { AppDelegate.shared?.notify(title: "Opened in Safari", body: why) }
+            if case .fallback(let notice) = await SafariController.open(url, profileId: profileId) {
+                await MainActor.run { AppDelegate.shared?.notify(notice) }
             }
         }
     }

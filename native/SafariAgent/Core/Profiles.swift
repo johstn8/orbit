@@ -721,7 +721,7 @@ enum SafariController {
         NSWorkspace.shared.open([url], withApplicationAt: safari, configuration: NSWorkspace.OpenConfiguration())
     }
 
-    enum Outcome { case done, fallback(String) }
+    enum Outcome { case done, fallback(OrbitNotice) }
 
     private static func safariName(_ profileId: String) -> String? {
         let p = SettingsStore.shared.current.profile(profileId)
@@ -735,7 +735,29 @@ enum SafariController {
     /// With `screen`, the window ends up on that display and the current Space: a window
     /// on another display is moved there; if the profile only has windows on other Spaces,
     /// a new window opens here instead (macOS doesn't let apps move windows between Spaces).
+    /// Start Safari if it isn't running and wait until its menus can be read.
+    static func ensureSafariRunning() async -> Bool {
+        let ready = { SafariAX.safariApp() != nil && SafariAX.profileMenu() != nil }
+        if await MainActor.run(body: ready) { return true }
+        await MainActor.run {
+            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: safariBundleId) else { return }
+            let cfg = NSWorkspace.OpenConfiguration()
+            cfg.activates = true
+            NSWorkspace.shared.openApplication(at: url, configuration: cfg)
+        }
+        for _ in 0..<60 {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            if await MainActor.run(body: ready) {
+                // Give Safari a moment to restore its windows before Orbit looks at them.
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                return true
+            }
+        }
+        return false
+    }
+
     static func focus(profileId: String, screen: NSScreen? = nil) async -> Outcome {
+        if AXIsProcessTrusted(), !(await ensureSafariRunning()) { return .fallback(.safariDidntStart()) }
         // Safari's window list is ordered front to back: the first window of the profile is
         // its most recently used one. This works even while the profile's extension sleeps.
         let viaAX = await MainActor.run { () -> Bool in
@@ -770,7 +792,9 @@ enum SafariController {
             await MainActor.run { activateSafari() }
             return .done
         }
-        return .fallback("Orbit couldn't reach this profile. Allow Accessibility for Orbit (Settings ▸ General) so it can switch Safari windows.")
+        let trusted = await MainActor.run { AXIsProcessTrusted() }
+        if !trusted { return .fallback(.accessibility("Needed to switch Safari windows")) }
+        return .fallback(.unknownProfile(safariName(profileId) ?? "this profile"))
     }
 
     /// Move a window onto `screen` (keeping its size) unless it is already mostly there.
@@ -790,6 +814,10 @@ enum SafariController {
     /// `openAnywayOnFailure`: for links from other apps, still open the link in Safari when the
     /// profile can't be reached (routing inside Safari handles that itself instead).
     static func open(_ url: URL, profileId: String, newWindow: Bool = false, openAnywayOnFailure: Bool = true) async -> Outcome {
+        if AXIsProcessTrusted(), Hub.shared.queue.sync(execute: { Hub.shared.instances[profileId] == nil }), !(await ensureSafariRunning()) {
+            if openAnywayOnFailure { await MainActor.run { openPlain(url) } }
+            return .fallback(.safariDidntStart())
+        }
         // The profile's extension is awake: it knows its windows best.
         if Hub.shared.queue.sync(execute: { Hub.shared.instances[profileId] != nil }),
            case .success = await Hub.shared.callInstance(profileId, "open_url", ["url": url.absoluteString, "newWindow": newWindow, "routed": true], timeout: 5) {
@@ -799,11 +827,11 @@ enum SafariController {
         // Otherwise use Safari's UI: raise the profile's window and open a tab there, or open
         // a new window of that profile (Accessibility + AppleScript).
         let s = SettingsStore.shared.current
-        guard let name = safariName(profileId), s.profile(profileId) != nil else { return .fallback("Unknown profile.") }
+        guard let name = safariName(profileId), s.profile(profileId) != nil else { return .fallback(.unknownProfile("this profile")) }
         let trusted = await MainActor.run { AXIsProcessTrusted() }
         guard trusted else {
             if openAnywayOnFailure { await MainActor.run { openPlain(url) } }
-            return .fallback("Orbit couldn't reach the “\(name)” profile. Allow Accessibility for Orbit so it can open windows in any profile.")
+            return .fallback(.accessibility("Needed to open links in “\(name)”"))
         }
         let mode = await MainActor.run { () -> String in
             if !newWindow, let w = SafariAX.windowProfiles().first(where: { $0.name == name }) {
@@ -814,9 +842,15 @@ enum SafariController {
         }
         guard mode != "none" else {
             if openAnywayOnFailure { await MainActor.run { openPlain(url) } }
-            return .fallback("Safari's menu has no window item for “\(name)”.")
+            return .fallback(.unknownProfile(name))
         }
         try? await Task.sleep(nanoseconds: mode == "tab" ? 150_000_000 : 450_000_000)
+        // Loading the link uses AppleScript: let macOS ask for permission first if needed
+        // (this waits for the user's answer, so it runs off the main thread).
+        let permission = await Task.detached { Permissions.automation(ask: true) }.value
+        if permission == .denied || permission == .notAsked {
+            return .fallback(.automation("Needed to open the link in “\(name)”"))
+        }
         let ok = await MainActor.run { () -> Bool in
             let u = url.absoluteString.replacingOccurrences(of: "\\", with: "%5C").replacingOccurrences(of: "\"", with: "%22")
             let src = mode == "tab"
@@ -827,6 +861,6 @@ enum SafariController {
             activateSafari()
             return err == nil
         }
-        return ok ? .done : .fallback("Orbit opened the “\(name)” window but couldn't load the link (allow Orbit to control Safari in Privacy & Security ▸ Automation).")
+        return ok ? .done : .fallback(.automation("Needed to open the link in “\(name)”"))
     }
 }

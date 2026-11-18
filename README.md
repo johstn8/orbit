@@ -46,8 +46,10 @@ This README is the full system overview: what exists, how the parts fit together
   - Screenshots, file tools, approvals, and cookie export/import.
 - **Permissions, which Orbit asks for only when you click the button:**
   - **Accessibility** (granted here): profile names and icons, focusing and opening windows, and the Dock-icon action.
+  - **Automation › Safari** (granted here): opening a link in a profile whose extension sleeps. macOS asks the first time; Settings › General shows the status.
   - **Full Disk Access** (optional): Safari's profile colors.
   - **Default browser** (optional): links from other apps.
+- **Problem messages** name what's missing and where to turn it on, with a button to that pane of System Settings, Safari or Orbit. If Safari isn't running, Orbit starts it before switching profiles.
 
 ### Known limitations (details in REPORT)
 
@@ -425,7 +427,7 @@ Then, once:
 
 1. In Safari › Settings › Extensions, enable **Orbit** and allow it on all websites.
 2. In Safari › Settings › Profiles › *each profile* › Extensions, turn on **Orbit**.
-3. In Orbit Settings › General, allow **Accessibility**.
+3. In Orbit Settings › General, allow **Accessibility** and **Control Safari** (Automation).
 4. Optionally:
    - Grant **Full Disk Access** for Safari's profile colors.
    - Use **Use Orbit…** to make Orbit the default browser.

@@ -50,6 +50,7 @@
             { "path": "SessionSharing.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
             { "path": "SafariDockWatcher.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
             { "path": "HistoryStore.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
+            { "path": "Notices.swift", "target-membership": [ "SafariAgent/compile-sources" ] },
           ],
         },
         {

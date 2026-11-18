@@ -215,8 +215,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func focus(profile id: String, screen: NSScreen? = nil) {
         let target = screen ?? NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }
         Task {
-            if case .fallback(let why) = await SafariController.focus(profileId: id, screen: target) {
-                await MainActor.run { self.notify(title: "Couldn't switch profile", body: why) }
+            if case .fallback(let notice) = await SafariController.focus(profileId: id, screen: target) {
+                await MainActor.run { self.notify(notice) }
             }
         }
     }
@@ -253,10 +253,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // MARK: transient notices
 
     private var hud: NSPanel?
-    func notify(title: String, body: String) {
+    func notify(title: String, body: String) { notify(OrbitNotice(title: title, body: body, action: nil)) }
+
+    /// A small glass notice at the top of the screen; with an action it offers a button
+    /// (e.g. to the right System Settings pane) and stays a little longer.
+    func notify(_ notice: OrbitNotice) {
         Log.helper.notice("notice shown")
         hud?.close()
-        let view = NSHostingView(rootView: NoticeHUD(title: title, message: body))
+        let close: () -> Void = { [weak self] in self?.hud?.close(); self?.hud = nil }
+        let view = NSHostingView(rootView: NoticeHUD(title: notice.title, message: notice.body, actionLabel: notice.action?.label,
+                                                     onAction: { MainActor.assumeIsolated { notice.action?.perform() }; close() }, onClose: close))
         view.frame.size = view.fittingSize
         let screen = NSScreen.main?.visibleFrame ?? .zero
         let p = NSPanel(contentRect: NSRect(x: screen.midX - view.frame.width / 2, y: screen.maxY - view.frame.height - 12, width: view.frame.width, height: view.frame.height),
@@ -268,20 +274,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         p.contentView = view
         p.orderFrontRegardless()
         hud = p
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) { [weak p] in if let p, self.hud === p { p.close(); self.hud = nil } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (notice.action == nil ? 4.5 : 12)) { [weak p] in if let p, self.hud === p { p.close(); self.hud = nil } }
     }
 }
 
 struct NoticeHUD: View {
     let title: String
     let message: String
+    var actionLabel: String?
+    var onAction: () -> Void = {}
+    var onClose: () -> Void = {}
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(nsImage: OrbitGlyph.image(size: 22)).foregroundStyle(.tint)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(.system(size: 13, weight: .semibold))
                 Text(message).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if let actionLabel {
+                    Button(actionLabel, action: onAction)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .padding(.top, 4)
+                }
             }
+            Spacer(minLength: 0)
+            Button(action: onClose) { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary) }
+                .buttonStyle(.plain)
+                .help("Close")
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
         .frame(width: 380, alignment: .leading)
