@@ -274,7 +274,7 @@ struct ProfilesPane: View {
                     refreshControl
                 }
             } footer: {
-                Text("Names, icons and order follow Safari automatically. Use Customize… to give a profile its own look in Orbit.")
+                Text("Names, icons and order follow Safari. The switch shows a profile in the picker and the menu bar; Customize… gives it its own look in Orbit.")
             }
             if unmatched {
                 Section {
@@ -383,11 +383,12 @@ struct ProfileRow: View {
                 Text(status).font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 12)
-            Toggle("In Picker", isOn: Binding(get: { !profile.hidden }, set: { v in update { $0.hidden = !v } }))
-                .toggleStyle(.checkbox)
-                .help("Show this profile in the picker and the menu bar")
             Button(profile.custom ? "Edit…" : "Customize…") { editing = true }
                 .popover(isPresented: $editing, arrowEdge: .trailing) { ProfileEditor(profile: profile) }
+            Toggle("", isOn: Binding(get: { !profile.hidden }, set: { v in update { $0.hidden = !v } }))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .help(profile.hidden ? "Hidden from the picker and menu bar" : "Shown in the picker and menu bar")
         }
         .padding(.vertical, 3)
     }
@@ -511,7 +512,8 @@ struct RoutingPane: View {
     @ObservedObject private var store = SettingsStore.shared
     @State private var testURL = ""
 
-    private var profiles: [ProfileConfig] { store.settings.pickerProfiles }
+    /// All Safari profiles, including ones hidden from the picker.
+    private var profiles: [ProfileConfig] { store.settings.listedProfiles }
 
     var body: some View {
         Form {
@@ -519,7 +521,8 @@ struct RoutingPane: View {
                 Toggle("Route websites to profiles", isOn: setting({ $0.routing.enabled }, { $0.routing.enabled = $1 }))
                 if store.settings.routing.pausedUntil > Date().timeIntervalSince1970 {
                     HStack {
-                        Text("Paused until \(Date(timeIntervalSince1970: store.settings.routing.pausedUntil).formatted(date: .omitted, time: .shortened))").foregroundStyle(.orange)
+                        Label("Paused until \(Date(timeIntervalSince1970: store.settings.routing.pausedUntil).formatted(date: .omitted, time: .shortened))", systemImage: "pause.circle.fill")
+                            .foregroundStyle(.orange)
                         Spacer()
                         Button("Resume") { SettingsStore.shared.update { $0.routing.pausedUntil = 0 } }
                     }
@@ -530,27 +533,37 @@ struct RoutingPane: View {
                         Button("15 min") { SettingsStore.shared.update { $0.routing.pausedUntil = Date().timeIntervalSince1970 + 900 } }
                         Button("1 hour") { SettingsStore.shared.update { $0.routing.pausedUntil = Date().timeIntervalSince1970 + 3600 } }
                     }
+                    .disabled(!store.settings.routing.enabled)
                 }
-            } footer: {
-                Text("Example: rule “moodle.uni.de → University”. A Moodle link clicked in your Personal profile opens in University instead, and your Personal tab stays exactly as it was.")
             }
-            Section("Rules") {
+            Section {
+                if store.settings.routing.rules.isEmpty {
+                    Text("No rules yet. Add one to open a website in a specific profile.").foregroundStyle(.secondary)
+                }
                 ForEach(store.settings.routing.rules) { rule in
                     RuleRow(rule: rule, profiles: profiles)
                 }
                 Button { SettingsStore.shared.update { $0.routing.rules.append(RoutingRule(pattern: "", profileId: profiles.first?.id ?? "")) } } label: {
                     Label("Add Rule", systemImage: "plus")
                 }
-                Text("Patterns: “example.com” (with subdomains), “*.example.com”, “example.com/path”, or “/regex/”. The first matching rule wins; choose “Stay in current profile” for exceptions.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Section("Test") {
-                HStack {
-                    TextField("https://…", text: $testURL).textFieldStyle(.roundedBorder)
-                    Text(testResult).foregroundStyle(.secondary)
+                .buttonStyle(.borderless)
+            } header: {
+                HStack(spacing: 6) {
+                    Text("Rules")
+                    InfoButton { RoutingHelp() }
                 }
             }
-            Section("Behavior") {
+            Section("Try a URL") {
+                HStack(spacing: 10) {
+                    TextField("", text: $testURL, prompt: Text("Paste a link to see where it opens"))
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                    if !testResult.isEmpty {
+                        Text(testResult).foregroundStyle(.secondary).lineLimit(1).fixedSize()
+                    }
+                }
+            }
+            Section {
                 Picker("Links from other apps", selection: setting({ $0.routing.externalLinks }, { $0.routing.externalLinks = $1 })) {
                     Text("Follow rules, otherwise ask").tag("rules")
                     Text("Always show the picker").tag("picker")
@@ -560,18 +573,51 @@ struct RoutingPane: View {
                     Text("Route and keep the current page").tag("keep")
                     Text("Don't route typed URLs").tag("off")
                 }
-                Toggle("Close the leftover tab after routing", isOn: setting({ $0.routing.closeRedundantTabs }, { $0.routing.closeRedundantTabs = $1 }))
-                Text("Only empty tabs that were opened for the routed link are closed, and only after the target profile confirmed it opened the page. Hold ⌥ Option while clicking a link to open it in the current profile; hold it while opening a link from another app to always get the picker.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Toggle(isOn: setting({ $0.routing.closeRedundantTabs }, { $0.routing.closeRedundantTabs = $1 })) {
+                    Text("Close the leftover tab after routing")
+                    Text("Only an empty tab opened for the link, once the other profile has opened it.")
+                }
+            } header: {
+                Text("Behavior")
             }
         }
         .formStyle(.grouped)
     }
 
     private var testResult: String {
-        guard let url = URL(string: testURL.contains("://") ? testURL : "https://\(testURL)"), !testURL.isEmpty else { return "" }
-        guard let id = RoutePattern.target(for: url, rules: store.settings.routing.rules) else { return "No rule — stays in the current profile" }
+        let raw = testURL.trimmingCharacters(in: .whitespaces)
+        guard !raw.isEmpty, let url = URL(string: raw.contains("://") ? raw : "https://\(raw)") else { return "" }
+        guard let id = RoutePattern.target(for: url, rules: store.settings.routing.rules) else { return "No rule · stays in the current profile" }
         return "→ \(store.settings.profile(id)?.name ?? "?")"
+    }
+}
+
+/// The ⓘ popover of the Rules section: what a rule does and how patterns work.
+struct RoutingHelp: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Website rules").font(.headline)
+            Text("A rule opens a website in the profile you choose. Example: “moodle.uni-example.de → University”. A Moodle link clicked in your Personal profile opens in University, and your Personal tab stays as it was.")
+            Divider()
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Patterns").font(.subheadline.weight(.semibold))
+                help("example.com", "the site and its subdomains")
+                help("*.example.com", "only subdomains")
+                help("example.com/path", "pages under a path")
+                help("/regex/", "a regular expression")
+            }
+            Divider()
+            Text("The first matching rule wins. Choose “Stay in current profile” for exceptions. Hold ⌥ Option while clicking a link to open it where you are.")
+        }
+        .font(.callout)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func help(_ pattern: String, _ meaning: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(pattern).font(.system(.callout, design: .monospaced)).frame(width: 130, alignment: .leading)
+            Text(meaning).foregroundStyle(.secondary)
+        }
     }
 }
 
@@ -583,19 +629,47 @@ struct RuleRow: View {
     }
     var body: some View {
         HStack(spacing: 10) {
-            Toggle("", isOn: Binding(get: { rule.enabled }, set: { v in update { $0.enabled = v } })).labelsHidden()
-            TextField("moodle.example.edu", text: Binding(get: { rule.pattern }, set: { v in update { $0.pattern = v } }))
+            Toggle("", isOn: Binding(get: { rule.enabled }, set: { v in update { $0.enabled = v } }))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .help(rule.enabled ? "Rule is on" : "Rule is off")
+            TextField("", text: Binding(get: { rule.pattern }, set: { v in update { $0.pattern = v.trimmingCharacters(in: .whitespaces) } }), prompt: Text("example.com"))
+                .labelsHidden()
                 .textFieldStyle(.roundedBorder)
-            Image(systemName: "arrow.right").foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading)
+                .opacity(rule.enabled ? 1 : 0.55)
+            Image(systemName: "arrow.right").foregroundStyle(.tertiary)
             Picker("", selection: Binding(get: { rule.profileId }, set: { v in update { $0.profileId = v } })) {
                 ForEach(profiles) { p in Label(p.name, systemImage: p.symbol).tag(p.id) }
                 Divider()
-                Text("Stay in current profile").tag("")
+                Label("Stay in current profile", systemImage: "arrow.uturn.backward").tag("")
             }
             .labelsHidden()
-            .frame(width: 190)
-            Button(role: .destructive) { SettingsStore.shared.update { s in s.routing.rules.removeAll { $0.id == rule.id } } } label: { Image(systemName: "minus.circle") }
-                .buttonStyle(.borderless)
+            .fixedSize()
+            .frame(minWidth: 170, alignment: .leading)
+            Button(role: .destructive) { SettingsStore.shared.update { s in s.routing.rules.removeAll { $0.id == rule.id } } } label: {
+                Image(systemName: "minus.circle.fill").foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Remove rule")
+        }
+    }
+}
+
+/// A small ⓘ button that shows an explanation in a popover.
+struct InfoButton<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+    @State private var shown = false
+    var body: some View {
+        Button { shown.toggle() } label: {
+            Image(systemName: "info.circle").imageScale(.medium)
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+        .help("More information")
+        .popover(isPresented: $shown, arrowEdge: .bottom) {
+            content().padding(16).frame(width: 360)
         }
     }
 }
@@ -604,7 +678,8 @@ struct RuleRow: View {
 
 struct LoginsPane: View {
     @ObservedObject private var store = SettingsStore.shared
-    private var profiles: [ProfileConfig] { store.settings.pickerProfiles }
+    /// All Safari profiles, including ones hidden from the picker.
+    private var profiles: [ProfileConfig] { store.settings.listedProfiles }
 
     static let presets: [(name: String, domain: String, extra: [String])] = [
         ("ChatGPT", "chatgpt.com", ["openai.com"]),
@@ -617,33 +692,47 @@ struct LoginsPane: View {
     var body: some View {
         Form {
             Section {
-                Text("Stay signed in to chosen websites in several Safari profiles. Orbit copies that site's login cookies from the profile you sign in with to the profiles you pick, whenever the login changes. Nothing else is shared, everything stays on this Mac, and the AI agent never sees these cookies.")
-                    .font(.callout).foregroundStyle(.secondary)
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "key.horizontal.fill").font(.title2).foregroundStyle(.tint).frame(width: 30)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Stay signed in everywhere").font(.body.weight(.medium))
+                        Text("Sign in once, and Orbit copies that website's login to your other Safari profiles. It stays on this Mac and the AI never sees it.")
+                            .font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                    InfoButton { LoginsHelp() }
+                }
+                .padding(.vertical, 2)
             }
             ForEach(store.settings.sharing) { site in
                 SharedSiteSection(site: site, profiles: profiles, conflicts: SessionSharing.conflicts(for: site, in: store.settings))
             }
             Section {
-                let missing = Self.presets.prefix(2).filter { p in !store.settings.sharing.contains { $0.domain == p.domain } }
-                if !missing.isEmpty {
-                    HStack {
-                        Text("Suggested").foregroundStyle(.secondary)
-                        ForEach(missing, id: \.domain) { p in
-                            Button { add(p.domain, p.extra) } label: { Label(p.name, systemImage: "plus.circle") }
+                HStack(spacing: 10) {
+                    Menu {
+                        ForEach(Self.presets, id: \.domain) { p in
+                            Button(p.name) { add(p.domain, p.extra) }
                         }
-                        Spacer()
+                        Divider()
+                        Button("Other Website…") { add("", []) }
+                    } label: { Label("Add Website", systemImage: "plus") }
+                    .fixedSize()
+                    let missing = Self.presets.prefix(2).filter { p in !store.settings.sharing.contains { $0.domain == p.domain } }
+                    if !missing.isEmpty {
+                        Text("Suggested:").foregroundStyle(.secondary)
+                        ForEach(missing, id: \.domain) { p in
+                            Button(p.name) { add(p.domain, p.extra) }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                        }
                     }
+                    Spacer()
                 }
-                Menu {
-                    ForEach(Self.presets, id: \.domain) { p in
-                        Button(p.name) { add(p.domain, p.extra) }
-                    }
-                    Divider()
-                    Button("Other Website…") { add("example.com", []) }
-                } label: { Label("Add Website", systemImage: "plus") }
-                .fixedSize()
             } footer: {
-                Text("Several accounts: Google keeps every account you're signed in to in one login, so adding a second account in the source profile (“Add another account”) shares both, with the first one as the default. For different accounts in different profiles, add the website twice — each with its own “Signed in with” profile and its own targets.\n\nLimitations: some sites tie a login to the device or browser profile, use passkeys or short-lived tokens, or sign you out when the same session is used twice. Signing out in one profile isn't mirrored; turn sharing off to stop updates. Passwords and passkeys saved in iCloud Keychain already work in every profile — that remains the most robust option.")
+                if store.settings.sharing.isEmpty {
+                    Text("Nothing is shared until you add a website and turn it on.")
+                }
             }
         }
         .formStyle(.grouped)
@@ -655,6 +744,24 @@ struct LoginsPane: View {
     }
 }
 
+/// The ⓘ popover of Shared Logins: how it works, several accounts, limits.
+struct LoginsHelp: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("How shared logins work").font(.headline)
+            Text("Orbit copies only the chosen website's login cookies, from the profile you signed in with to the profiles you pick. It updates them whenever the login changes, and when you start using another profile.")
+            Divider()
+            Text("Several accounts").font(.subheadline.weight(.semibold))
+            Text("Google keeps all accounts you're signed in to in one login, so a second account added in the source profile is shared too. For different accounts in different profiles, add the website twice, each with its own profiles.")
+            Divider()
+            Text("Limits").font(.subheadline.weight(.semibold))
+            Text("Signing out isn't copied; turn sharing off to stop updates. Sites that tie a login to one device or use passkeys may still ask you to sign in. Passwords and passkeys in iCloud Keychain already work in every profile.")
+        }
+        .font(.callout)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
 struct SharedSiteSection: View {
     let site: SharedSite
     let profiles: [ProfileConfig]
@@ -662,99 +769,148 @@ struct SharedSiteSection: View {
     @State private var syncing = false
     /// Briefly shown after a manual sync: true = shared, false = needs attention.
     @State private var flash: Bool?
+    @State private var showOptions: Bool
+
+    init(site: SharedSite, profiles: [ProfileConfig], conflicts: [String] = []) {
+        self.site = site
+        self.profiles = profiles
+        self.conflicts = conflicts
+        _showOptions = State(initialValue: site.domain.isEmpty)
+    }
 
     private func update(_ f: @escaping (inout SharedSite) -> Void) {
         SettingsStore.shared.update { s in if let i = s.sharing.firstIndex(where: { $0.id == site.id }) { f(&s.sharing[i]) } }
     }
 
+    private var others: [ProfileConfig] { profiles.filter { $0.id != site.sourceProfileId } }
+
+    private var targetSummary: String {
+        if site.targets.isEmpty { return "All other profiles" }
+        let names = others.filter { site.targets.contains($0.id) }.map(\.name)
+        return names.isEmpty ? "No profiles" : names.joined(separator: ", ")
+    }
+
+    private var ok: Bool { (site.lastResult ?? "").hasPrefix("Shared with") && !(site.lastResult ?? "").contains("Problem") }
+
     var body: some View {
         Section {
-            Toggle(isOn: Binding(get: { site.enabled }, set: { v in update { $0.enabled = v } })) {
-                Text("Share this login").font(.body.weight(.medium))
-            }
-            TextField("Website", text: Binding(get: { site.domain }, set: { v in update { $0.domain = v.lowercased().trimmingCharacters(in: .whitespaces) } }))
-            TextField("Also includes (comma separated)", text: Binding(get: { site.extraDomains.joined(separator: ", ") }, set: { v in
-                update { $0.extraDomains = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty } }
-            }))
-            Picker("Signed in with", selection: Binding(get: { site.sourceProfileId }, set: { v in update { $0.sourceProfileId = v } })) {
-                ForEach(profiles) { p in Label(p.name, systemImage: p.symbol).tag(p.id) }
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Share with")
-                HStack(spacing: 8) {
-                    Toggle("All other profiles", isOn: Binding(get: { site.targets.isEmpty }, set: { v in update { $0.targets = v ? [] : profiles.map(\.id).filter { $0 != site.sourceProfileId } } }))
-                        .toggleStyle(.checkbox)
-                    if !site.targets.isEmpty {
-                        ForEach(profiles.filter { $0.id != site.sourceProfileId }) { p in
-                            Toggle(p.name, isOn: Binding(get: { site.targets.contains(p.id) }, set: { v in update { s in
-                                if v { if !s.targets.contains(p.id) { s.targets.append(p.id) } } else { s.targets.removeAll { $0 == p.id } }
-                                if s.targets.isEmpty { s.targets = [p.id] }
-                            } })).toggleStyle(.checkbox)
-                        }
-                    }
+            // Website, status and the main switch.
+            HStack(spacing: 12) {
+                SiteBadge(domain: site.domain)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(site.domain.isEmpty ? "New website" : site.domain).font(.body.weight(.semibold))
+                    status
                 }
-            }
-            TextField("Never copy these cookies (exceptions)", text: Binding(get: { site.excludedCookies.joined(separator: ", ") }, set: { v in
-                update { $0.excludedCookies = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } }
-            }))
-            if !conflicts.isEmpty {
-                Label("\(conflicts.joined(separator: ", ")) also receive\(conflicts.count == 1 ? "s" : "") this website from another entry. Give each entry different targets.", systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(.orange)
-            }
-            HStack(alignment: .center, spacing: 10) {
-                if let r = site.lastResult {
-                    let ok = r.hasPrefix("Shared with") && !r.contains("Problem")
-                    Label {
-                        Text(r + (site.lastSync.map { " · \(Date(timeIntervalSince1970: $0).formatted(date: .omitted, time: .shortened))" } ?? ""))
-                            .fixedSize(horizontal: false, vertical: true)
-                    } icon: {
-                        Image(systemName: ok ? "checkmark.circle.fill" : r.contains("Problem") ? "exclamationmark.triangle.fill" : "clock")
-                            .foregroundStyle(ok ? Color.green : r.contains("Problem") ? Color.orange : Color.secondary)
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                } else {
-                    Text(site.enabled ? "Not synced yet" : "Sharing is off").font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button {
-                    syncing = true
-                    flash = nil
-                    Hub.shared.queue.async {
-                        SessionSharing.shared.sync(site.id) { result in
-                            DispatchQueue.main.async {
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                    syncing = false
-                                    flash = result.hasPrefix("Shared with") && !result.contains("Problem")
-                                }
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { withAnimation { flash = nil } }
-                            }
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        if syncing {
-                            ProgressView().controlSize(.small)
-                        } else if let ok = flash {
-                            Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                                .foregroundStyle(ok ? Color.green : Color.orange)
-                                .transition(.scale.combined(with: .opacity))
-                        }
-                        Text(syncing ? "Syncing…" : flash == true ? "Synced" : flash == false ? "Not Synced" : "Sync Now")
-                    }
-                    .frame(minWidth: 96)
-                }
-                .disabled(!site.enabled || syncing)
-                Button(role: .destructive) { SettingsStore.shared.update { s in s.sharing.removeAll { $0.id == site.id } } } label: { Image(systemName: "trash") }
-                    .buttonStyle(.borderless)
-                    .help("Remove this website")
+                Spacer(minLength: 12)
+                syncButton
+                Toggle("", isOn: Binding(get: { site.enabled }, set: { v in update { $0.enabled = v } }))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .disabled(site.domain.isEmpty)
+                    .help(site.enabled ? "Sharing is on" : "Sharing is off")
             }
             .padding(.vertical, 2)
-            .background(RoundedRectangle(cornerRadius: 8).fill(flash == nil ? Color.clear : (flash == true ? Color.green : Color.orange).opacity(0.10)).padding(-4))
-            .animation(.easeOut(duration: 0.4), value: flash)
-        } header: {
-            Text(site.domain.isEmpty ? "Website" : site.domain)
+            Picker("Signed in with", selection: Binding(get: { site.sourceProfileId }, set: { v in update { $0.sourceProfileId = v; $0.targets.removeAll { $0 == v } } })) {
+                ForEach(profiles) { p in Label(p.name, systemImage: p.symbol).tag(p.id) }
+            }
+            LabeledContent("Share with") {
+                Menu(targetSummary) {
+                    Toggle("All other profiles", isOn: Binding(get: { site.targets.isEmpty }, set: { v in update { $0.targets = v ? [] : others.map(\.id) } }))
+                    Divider()
+                    ForEach(others) { p in
+                        Toggle(isOn: Binding(get: { site.targets.isEmpty || site.targets.contains(p.id) }, set: { v in update { s in
+                            var chosen = s.targets.isEmpty ? others.map(\.id) : s.targets
+                            if v { if !chosen.contains(p.id) { chosen.append(p.id) } } else { chosen.removeAll { $0 == p.id } }
+                            if chosen.isEmpty { return }
+                            s.targets = Set(chosen) == Set(others.map(\.id)) ? [] : chosen
+                        } })) { Label(p.name, systemImage: p.symbol) }
+                    }
+                }
+                .fixedSize()
+            }
+            if !conflicts.isEmpty {
+                Label("\(conflicts.joined(separator: ", ")) also get\(conflicts.count == 1 ? "s" : "") this website from another entry. Give each entry different profiles.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            DisclosureGroup("Options", isExpanded: $showOptions) {
+                TextField("Website", text: Binding(get: { site.domain }, set: { v in update { $0.domain = v.lowercased().trimmingCharacters(in: .whitespaces) } }), prompt: Text("example.com"))
+                TextField("Related websites", text: Binding(get: { site.extraDomains.joined(separator: ", ") }, set: { v in
+                    update { $0.extraDomains = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty } }
+                }), prompt: Text("e.g. openai.com"))
+                TextField("Never copy cookies", text: Binding(get: { site.excludedCookies.joined(separator: ", ") }, set: { v in
+                    update { $0.excludedCookies = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } }
+                }), prompt: Text("cookie names, comma separated"))
+                HStack {
+                    Spacer()
+                    Button("Remove Website", role: .destructive) { SettingsStore.shared.update { s in s.sharing.removeAll { $0.id == site.id } } }
+                }
+            }
         }
+    }
+
+    @ViewBuilder private var status: some View {
+        let time = site.lastSync.map { " · \(Date(timeIntervalSince1970: $0).formatted(date: .omitted, time: .shortened))" } ?? ""
+        if !site.enabled {
+            Text(site.domain.isEmpty ? "Enter the website under Options" : "Off").font(.caption).foregroundStyle(.secondary)
+        } else if let r = site.lastResult {
+            let problem = r.contains("Problem")
+            Label {
+                Text(r.trimmingCharacters(in: CharacterSet(charactersIn: ".")) + time).lineLimit(2)
+            } icon: {
+                Image(systemName: ok ? "checkmark.circle.fill" : problem ? "exclamationmark.triangle.fill" : "clock")
+                    .foregroundStyle(ok ? Color.green : problem ? Color.orange : Color.secondary)
+            }
+            .font(.caption).foregroundStyle(.secondary)
+        } else {
+            Text("Not synced yet").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var syncButton: some View {
+        Button {
+            syncing = true
+            flash = nil
+            Hub.shared.queue.async {
+                SessionSharing.shared.sync(site.id) { result in
+                    DispatchQueue.main.async {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            syncing = false
+                            flash = result.hasPrefix("Shared with") && !result.contains("Problem")
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { withAnimation { flash = nil } }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                if syncing {
+                    ProgressView().controlSize(.small)
+                } else if let ok = flash {
+                    Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(ok ? Color.green : Color.orange)
+                        .transition(.scale.combined(with: .opacity))
+                }
+                Text(syncing ? "Syncing…" : flash == true ? "Synced" : flash == false ? "Not Synced" : "Sync Now")
+            }
+            .frame(minWidth: 84)
+        }
+        .disabled(!site.enabled || syncing)
+        .opacity(site.enabled ? 1 : 0)
+    }
+}
+
+/// A rounded tile with the website's first letter, in a color derived from its name.
+struct SiteBadge: View {
+    let domain: String
+    private static let palette = ["#0A84FF", "#30D158", "#FF9F0A", "#BF5AF2", "#FF375F", "#64D2FF", "#5E5CE6", "#AC8E68"]
+    var body: some View {
+        let letter = domain.first.map { String($0).uppercased() } ?? "?"
+        let color = Self.palette[abs(domain.unicodeScalars.reduce(0) { ($0 &* 31) &+ Int($1.value) }) % Self.palette.count]
+        Text(letter)
+            .font(.system(size: 15, weight: .bold, design: .rounded))
+            .foregroundStyle(.white)
+            .frame(width: 32, height: 32)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color(hex: color).gradient))
     }
 }
 

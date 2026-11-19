@@ -246,7 +246,7 @@ extension AppSettings {
     /// The configuration an extension instance needs (no secrets).
     func extensionConfig(for profileId: String) -> JSONObject {
         let rules: [JSONObject] = routing.rules.filter { $0.enabled }.map { ["id": $0.id, "pattern": $0.pattern, "profileId": $0.profileId] }
-        let sites: [JSONObject] = sharing.filter { $0.enabled }.map { s in
+        let sites: [JSONObject] = sharing.filter { $0.enabled && !$0.domain.isEmpty }.map { s in
             ["id": s.id, "domain": s.domain, "extraDomains": s.extraDomains, "sourceProfileId": s.sourceProfileId, "targets": s.targets, "excludedCookies": s.excludedCookies]
         }
         return [

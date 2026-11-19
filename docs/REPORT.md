@@ -120,6 +120,14 @@ The prompt-free real-Safari checks verify:
 - Personal details were removed from the docs.
 - `build.sh` now explains missing prerequisites (Node.js, Xcode), and `install.sh` names the next step in Safari.
 
+## 1.1.4: settings polish
+
+- **⌘W did nothing** in the settings window: Orbit, as a menu bar app, had no main menu, so ⌘W, ⌘C/⌘V/⌘A in text fields, ⌘Z and ⌘M had no menu item to trigger. Orbit now has standard Orbit, Edit and Window menus. Verified: ⌘W closed the window.
+- **Website Routing:** each rule showed its placeholder ("moodle.example.edu") as a label, because a grouped form shows a text field's title. Rules are now one clean row (switch, pattern, profile, remove). The example and pattern help moved into an ⓘ popover.
+- **Shared Logins:** each website is one card with its status, Sync Now and an on/off switch. "Signed in with" and "Share with" (a menu) follow, and the related websites and cookie exceptions are under Options. The explanations moved into an ⓘ popover.
+- **Profiles:** a switch replaces the "In Picker" checkbox.
+- Routing and Shared Logins now list profiles that are hidden from the picker too.
+
 ## Remaining limitations
 
 - **Profile identity and names:**

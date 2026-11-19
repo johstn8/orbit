@@ -71,6 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         ProfileRegistry.shared.start()
         SafariDockWatcher.shared.start()
         setupStatusItem()
+        NSApp.mainMenu = makeMainMenu()
         HotKey.shared.onPress = { [weak self] in self?.showPicker() }
         HotKey.shared.handlers[2] = { HistoryPanelController.shared.toggle() }
         SettingsStore.shared.$settings
@@ -112,6 +113,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         openSettings(section: nil)
         return true
     }
+
+    // MARK: main menu
+
+    /// The standard app, Edit and Window menus. Orbit is a menu bar app, but while its
+    /// settings window is open it shows a menu bar, and without these menus ⌘W, ⌘C/⌘V/⌘A
+    /// in text fields, ⌘Z and ⌘M would do nothing.
+    private func makeMainMenu() -> NSMenu {
+        let main = NSMenu()
+        func submenu(_ title: String, _ items: [NSMenuItem]) -> NSMenu {
+            let m = NSMenu(title: title)
+            items.forEach(m.addItem)
+            let holder = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            holder.submenu = m
+            main.addItem(holder)
+            return m
+        }
+        func item(_ title: String, _ action: Selector?, _ key: String, _ mods: NSEvent.ModifierFlags = .command, target: AnyObject? = nil) -> NSMenuItem {
+            let mi = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            mi.keyEquivalentModifierMask = mods
+            mi.target = target
+            return mi
+        }
+        _ = submenu(appDisplayName, [
+            item("About \(appDisplayName)", #selector(openAboutAction), "", target: self),
+            .separator(),
+            item("Settings…", #selector(openSettingsAction), ",", target: self),
+            .separator(),
+            item("Hide \(appDisplayName)", #selector(NSApplication.hide(_:)), "h"),
+            item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]),
+            item("Show All", #selector(NSApplication.unhideAllApplications(_:)), ""),
+            .separator(),
+            item("Quit \(appDisplayName)", #selector(NSApplication.terminate(_:)), "q"),
+        ])
+        _ = submenu("Edit", [
+            item("Undo", Selector(("undo:")), "z"),
+            item("Redo", Selector(("redo:")), "z", [.command, .shift]),
+            .separator(),
+            item("Cut", #selector(NSText.cut(_:)), "x"),
+            item("Copy", #selector(NSText.copy(_:)), "c"),
+            item("Paste", #selector(NSText.paste(_:)), "v"),
+            item("Select All", #selector(NSText.selectAll(_:)), "a"),
+        ])
+        let window = submenu("Window", [
+            item("Close", #selector(NSWindow.performClose(_:)), "w"),
+            item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
+            item("Zoom", #selector(NSWindow.performZoom(_:)), ""),
+        ])
+        NSApp.windowsMenu = window
+        return main
+    }
+
+    @objc func openAboutAction() { openSettings(section: SettingsSection.about.rawValue) }
 
     // MARK: menu bar
 

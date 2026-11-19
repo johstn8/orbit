@@ -104,7 +104,7 @@ final class SessionSharing {
 
     func sync(_ siteId: String, completion: ((String) -> Void)?) {
         let s = SettingsStore.shared.current
-        guard let site = s.sharing.first(where: { $0.id == siteId }), site.enabled else { completion?("Sharing is off."); return }
+        guard let site = s.sharing.first(where: { $0.id == siteId }), site.enabled, !site.domain.isEmpty else { completion?("Sharing is off."); return }
         let doms = domains(site)
         let sourceName = s.profile(site.sourceProfileId)?.name ?? "the source profile"
         let fromCache = { [weak self] () -> Bool in
