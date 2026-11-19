@@ -305,6 +305,12 @@ enum SafariAX {
         return name.isEmpty ? nil : (name, params(id)["isDefaultProfile"] == "true")
     }
 
+    /// Safari's menu bar can be read (it has launched and Accessibility works).
+    static func menuBarReady() -> Bool {
+        guard let app = safariElement(), let bar = attr(app, kAXMenuBarAttribute) else { return false }
+        return children(bar as! AXUIElement).count > 2
+    }
+
     /// The per-profile items of File ▸ New Window, in Safari's order (no private window).
     static func profileMenu() -> [MenuItem]? {
         guard let app = safariElement(), let bar = attr(app, kAXMenuBarAttribute) else { return nil }
@@ -731,31 +737,38 @@ enum SafariController {
     /// Set while Orbit itself opens Safari windows (the Dock watcher ignores these moments).
     static var openingUntil = Date.distantPast
 
-    /// Bring the profile's most recently used window to the front, or open a new window.
-    /// With `screen`, the window ends up on that display and the current Space: a window
-    /// on another display is moved there; if the profile only has windows on other Spaces,
-    /// a new window opens here instead (macOS doesn't let apps move windows between Spaces).
     /// Start Safari if it isn't running and wait until its menus can be read.
+    /// Doesn't touch a Safari that is already running, and doesn't need profiles
+    /// (Safari without profiles has no per-profile menu items).
     static func ensureSafariRunning() async -> Bool {
-        let ready = { SafariAX.safariApp() != nil && SafariAX.profileMenu() != nil }
+        let ready = { () -> Bool in
+            guard let app = SafariAX.safariApp(), app.isFinishedLaunching else { return false }
+            return SafariAX.menuBarReady()
+        }
         if await MainActor.run(body: ready) { return true }
-        await MainActor.run {
-            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: safariBundleId) else { return }
+        let launched = await MainActor.run { () -> Bool in
+            guard SafariAX.safariApp() == nil,
+                  let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: safariBundleId) else { return false }
             let cfg = NSWorkspace.OpenConfiguration()
             cfg.activates = true
             NSWorkspace.shared.openApplication(at: url, configuration: cfg)
+            return true
         }
         for _ in 0..<60 {
             try? await Task.sleep(nanoseconds: 100_000_000)
             if await MainActor.run(body: ready) {
-                // Give Safari a moment to restore its windows before Orbit looks at them.
-                try? await Task.sleep(nanoseconds: 600_000_000)
+                // Give a freshly started Safari a moment to restore its windows.
+                if launched { try? await Task.sleep(nanoseconds: 600_000_000) }
                 return true
             }
         }
         return false
     }
 
+    /// Bring the profile's most recently used window to the front, or open a new window.
+    /// With `screen`, the window ends up on that display and the current Space: a window
+    /// on another display is moved there; if the profile only has windows on other Spaces,
+    /// a new window opens here instead (macOS doesn't let apps move windows between Spaces).
     static func focus(profileId: String, screen: NSScreen? = nil) async -> Outcome {
         if AXIsProcessTrusted(), !(await ensureSafariRunning()) { return .fallback(.safariDidntStart()) }
         // Safari's window list is ordered front to back: the first window of the profile is

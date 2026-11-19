@@ -86,7 +86,11 @@ final class Router {
                 let outcome = await SafariController.open(url, profileId: target, newWindow: p["newWindow"] as? Bool ?? false, openAnywayOnFailure: false)
                 switch outcome {
                 case .done: reply(.success(["ok": true]))
-                case .fallback(let notice): reply(.success(["ok": false, "reason": notice.title.lowercased()]))
+                case .fallback(let notice):
+                    // Safari shows the reason in the page; a permission problem also gets
+                    // Orbit's notice, whose button opens the right settings pane.
+                    if notice.isPermission { await MainActor.run { AppDelegate.shared?.notify(notice) } }
+                    reply(.success(["ok": false, "reason": notice.reason]))
                 }
             }
         case "route.pause":

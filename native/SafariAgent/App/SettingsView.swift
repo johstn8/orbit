@@ -905,7 +905,8 @@ struct SiteBadge: View {
     private static let palette = ["#0A84FF", "#30D158", "#FF9F0A", "#BF5AF2", "#FF375F", "#64D2FF", "#5E5CE6", "#AC8E68"]
     var body: some View {
         let letter = domain.first.map { String($0).uppercased() } ?? "?"
-        let color = Self.palette[abs(domain.unicodeScalars.reduce(0) { ($0 &* 31) &+ Int($1.value) }) % Self.palette.count]
+        let hash = domain.unicodeScalars.reduce(UInt(0)) { ($0 &* 31) &+ UInt($1.value) }
+        let color = Self.palette[Int(hash % UInt(Self.palette.count))]
         Text(letter)
             .font(.system(size: 15, weight: .bold, design: .rounded))
             .foregroundStyle(.white)

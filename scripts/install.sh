@@ -30,4 +30,8 @@ done
 "$LSREGISTER" -f "$DEST/Orbit.app"
 open "$DEST/Orbit.app" --args --background
 echo "Installed: $DEST/Orbit.app"
+if pgrep -xq Safari; then
+  echo "Safari is open, so it reloads Orbit's extension now: open pages need a reload to use Orbit again."
+  echo "If a window loses its address field (a Safari glitch), use View › Customize Toolbar… to drag it back."
+fi
 echo "Next: in Safari › Settings › Extensions, turn on Orbit (and in each profile's Extensions tab)."

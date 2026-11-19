@@ -128,10 +128,19 @@ The prompt-free real-Safari checks verify:
 - **Profiles:** a switch replaces the "In Picker" checkbox.
 - Routing and Shared Logins now list profiles that are hidden from the picker too.
 
+## 1.1.5: fixes after review
+
+- **A Safari window lost its address field** after the 1.1.4 install. Safari's log shows that installing Orbit made Safari reload the extension in every profile and rebuild its toolbars (20:48:51). In the window that was open in one profile, the toolbar came back without the address field, with Orbit's button in its place. Orbit's code never changes Safari's toolbar, and the extension was unchanged since 1.1.0. The trigger is updating Orbit while Safari is open. `install.sh` now says so when Safari is running, and the README explains how to get the field back (View › Customize Toolbar…) without reloading any tab.
+- **Safari start check needed profiles:** 1.1.1 waited for Safari's per-profile menu items to decide that Safari was ready. Safari without profiles has none, so Orbit waited 6 seconds, activated Safari and reported "Safari didn't open". It now checks that Safari has finished launching and its menu bar is readable, and only starts Safari if it isn't running.
+- **Lower-case reasons in Safari:** a failed route showed e.g. "Couldn't open in Work (allow accessibility for orbit)". Each notice now has a short phrase for running text ("Orbit needs Accessibility permission"). Permission problems also show Orbit's notice with the button to the right settings pane.
+- **Version:** the app and extension still reported 1.0.0. They now report 1.1.5.
+- **Site badge:** the color hash could, in theory, hit `abs(Int.min)` and crash. It now uses unsigned arithmetic.
+- **Test leftover:** a stub extension from a 14 November packaging test was still registered with macOS, and Safari logged errors about it. It is unregistered and deleted.
+
 ## Remaining limitations
 
 - **Profile identity and names:**
-  - Safari doesn't provide `SFExtensionProfileKey` for the default profile, so its id is are per-instance random ids in per-profile storage.
+  - Safari doesn't provide `SFExtensionProfileKey` for the default profile, so its id is a random id kept in that profile's extension storage.
   - If you clear Safari's extension data for a profile, it appears as a new profile; rename it or forget the old entry in Settings.
   - Names and icons need Accessibility; colors need Full Disk Access (otherwise Orbit's colors). Icons are known once a window of the profile has been seen.
 - **Reachability:** a profile is reachable while its extension instance runs. Without Accessibility, a profile with no windows can't be opened by Orbit, and links then open in Safari normally with a notice.

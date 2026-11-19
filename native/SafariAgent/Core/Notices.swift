@@ -8,6 +8,19 @@ struct OrbitNotice {
     var title: String
     var body: String
     var action: Action?
+    /// The problem as a short phrase for running text, e.g. in Safari's
+    /// "Couldn't open in Work (…). Opened here instead."
+    var reason: String
+
+    init(title: String, body: String, action: Action?, reason: String? = nil) {
+        self.title = title
+        self.body = body
+        self.action = action
+        self.reason = reason ?? title
+    }
+
+    /// Permission problems: worth a notice with a button even where Safari already shows a message.
+    var isPermission: Bool { if case .privacy = action { return true } else { return false } }
 
     enum Action {
         /// A pane of System Settings ▸ Privacy & Security (e.g. "Privacy_Accessibility").
@@ -36,13 +49,15 @@ struct OrbitNotice {
     static func accessibility(_ purpose: String) -> OrbitNotice {
         OrbitNotice(title: "Allow Accessibility for Orbit",
                     body: "\(purpose). Turn on Orbit in Privacy & Security ▸ Accessibility.",
-                    action: .privacy("Privacy_Accessibility"))
+                    action: .privacy("Privacy_Accessibility"),
+                    reason: "Orbit needs Accessibility permission")
     }
 
     static func automation(_ purpose: String) -> OrbitNotice {
         OrbitNotice(title: "Allow Orbit to control Safari",
                     body: "\(purpose). Turn on Safari in Privacy & Security ▸ Automation ▸ Orbit.",
-                    action: .privacy("Privacy_Automation"))
+                    action: .privacy("Privacy_Automation"),
+                    reason: "Orbit isn't allowed to control Safari")
     }
 
     static func unknownProfile(_ name: String) -> OrbitNotice {
@@ -52,13 +67,14 @@ struct OrbitNotice {
     }
 
     static func safariDidntStart() -> OrbitNotice {
-        OrbitNotice(title: "Safari didn't open", body: "Open Safari once, then try again.", action: nil)
+        OrbitNotice(title: "Safari didn't open", body: "Open Safari once, then try again.", action: nil, reason: "Safari didn't respond")
     }
 
     static func extensionOff(_ profile: String) -> OrbitNotice {
         OrbitNotice(title: "Turn on Orbit in “\(profile)”",
                     body: "In Safari ▸ Settings ▸ Profiles ▸ \(profile) ▸ Extensions, turn on Orbit.",
-                    action: .safariExtensions)
+                    action: .safariExtensions,
+                    reason: "Orbit is off in “\(profile)”")
     }
 }
 

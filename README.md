@@ -141,11 +141,15 @@ The AI providers receive what you send in a chat, plus the page content and file
   - After a rebuild, macOS may no longer recognize the app.
   - In **System Settings › Privacy & Security › Accessibility**, remove Orbit with **−**, then turn it on again.
 - **A tab shows "Reload to use Orbit here":** the tab was open while Orbit was updated. Reload it.
+- **A Safari window lost its address field after an update:**
+  - Safari rebuilds its toolbars when Orbit's extension is updated, and can leave the address field out of a window that was open. Your tabs aren't affected.
+  - In that window, choose **View › Customize Toolbar…** and drag the address field back into the toolbar.
+  - To avoid it, quit Safari before you update Orbit.
 - **Claude isn't detected:** Orbit looks for `claude` in `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`. Run `claude auth status` to check your sign-in.
 
 ## Update and uninstall
 
-To update, from the `orbit` folder:
+To update, quit Safari first, then run this from the `orbit` folder:
 
 ```bash
 git pull && scripts/build.sh && scripts/install.sh
