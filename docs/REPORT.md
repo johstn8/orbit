@@ -142,6 +142,11 @@ The prompt-free real-Safari checks verify:
 - **Orbit crashed** (SIGABRT on the hub queue in `refreshProvidersLate`). The hub replaced `lastProviderStatus` on its own queue while the settings window's model read it on the main thread, without synchronization. The racing read and release corrupted the array's reference count, and Swift aborted when it freed the array. `lastProviderStatus` and `connectionLog` are now behind a lock.
 - **A build copy took over after the crash:** the Orbit that started at the moment of the crash ran from `build/DerivedData`. The extension now restarts the copy macOS has registered (the installed one) and only falls back to its own container.
 
+## 1.1.7: pages under the sidebar after switching tabs
+
+- **Cause:** Orbit makes room for fixed layers (app shells, headers) when it scans the page and when the page changes its elements. While a tab is hidden, Safari runs no animation frames, so apps such as chatgpt.com finish their layout only after the tab is shown again, often without changing any attribute. Layers measured while hidden (often 0 wide) were never measured again and stayed under the sidebar.
+- **Fix:** when a tab becomes visible again (and on `pageshow`, and on window focus at most every 3 s), Orbit re-applies the page margin and rescans now, after 0.4 s and after 1.5 s. It also watches `<head>`, so a site that rebuilds it can't drop the margin style.
+
 ## Remaining limitations
 
 - **Profile identity and names:**

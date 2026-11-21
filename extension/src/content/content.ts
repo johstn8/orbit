@@ -186,7 +186,23 @@ function main() {
     }, 2000);
     fullScan();
   };
+  // Re-measure when the tab comes back. While a tab is hidden Safari doesn't run
+  // animation frames, so many apps (chatgpt.com, ...) finish their layout only once it
+  // is visible again — without a new attribute change. Layers measured while hidden
+  // (often 0 wide) would then stay under the sidebar. Rescan now and twice more while
+  // the page settles; adjusted layers are skipped, so this is cheap.
+  let rescanTimers: any[] = [];
+  const refreshLayout = () => {
+    if (!wanted || !panelHost) return;
+    writePush();
+    rescanTimers.forEach(clearTimeout);
+    rescanTimers = [0, 400, 1500].map((ms) => setTimeout(() => {
+      if (wanted && panelHost && observer && document.visibilityState === "visible") fullScan();
+    }, ms));
+  };
   const stopFixing = () => {
+    rescanTimers.forEach(clearTimeout);
+    rescanTimers = [];
     observer?.disconnect();
     observer = null;
     clearInterval(checkInterval);
@@ -212,6 +228,8 @@ function main() {
       if (wanted && pushStyle && !pushStyle.isConnected) writePush();
     });
     hostGuard.observe(document.documentElement, { childList: true });
+    // The push style usually lives in <head>; some sites rebuild its children.
+    if (document.head) hostGuard.observe(document.head, { childList: true });
   };
 
   let markReady = () => {};
@@ -617,7 +635,8 @@ function main() {
     try { browser.storage.onChanged.removeListener(onStorage); } catch { /* orphaned */ }
     if (w.__safariAgentHandle === handleRequest) w.__safariAgentHandle = undefined;
     document.removeEventListener("visibilitychange", onVisible);
-    window.removeEventListener("pageshow", sync);
+    window.removeEventListener("pageshow", onPageShow);
+    window.removeEventListener("focus", onFocus);
     window.removeEventListener("keydown", onKey, true);
     window.removeEventListener("click", onLinkClick, true);
     window.removeEventListener("auxclick", onLinkClick, true);
@@ -648,8 +667,19 @@ function main() {
       setIndicator(!!r.agentActive);
     }).catch(() => { /* background busy or restarting: keep what is shown */ });
   };
-  const onVisible = () => { if (document.visibilityState === "visible") sync(); };
+  const onVisible = () => { if (document.visibilityState === "visible") { refreshLayout(); sync(); } };
+  const onPageShow = () => { refreshLayout(); sync(); };
+  // Window focus (e.g. coming back from another window); also fires when focus leaves
+  // the sidebar for the page, so at most every few seconds.
+  let lastFocusRefresh = 0;
+  const onFocus = () => {
+    const now = Date.now();
+    if (now - lastFocusRefresh < 3000) return;
+    lastFocusRefresh = now;
+    refreshLayout();
+  };
   document.addEventListener("visibilitychange", onVisible);
-  window.addEventListener("pageshow", sync);
+  window.addEventListener("pageshow", onPageShow);
+  window.addEventListener("focus", onFocus);
   sync();
 }
