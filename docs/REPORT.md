@@ -137,6 +137,11 @@ The prompt-free real-Safari checks verify:
 - **Site badge:** the color hash could, in theory, hit `abs(Int.min)` and crash. It now uses unsigned arithmetic.
 - **Test leftover:** a stub extension from a 14 November packaging test was still registered with macOS, and Safari logged errors about it. It is unregistered and deleted.
 
+## 1.1.6: crash fix
+
+- **Orbit crashed** (SIGABRT on the hub queue in `refreshProvidersLate`). The hub replaced `lastProviderStatus` on its own queue while the settings window's model read it on the main thread, without synchronization. The racing read and release corrupted the array's reference count, and Swift aborted when it freed the array. `lastProviderStatus` and `connectionLog` are now behind a lock.
+- **A build copy took over after the crash:** the Orbit that started at the moment of the crash ran from `build/DerivedData`. The extension now restarts the copy macOS has registered (the installed one) and only falls back to its own container.
+
 ## Remaining limitations
 
 - **Profile identity and names:**

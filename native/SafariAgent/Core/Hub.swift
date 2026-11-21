@@ -93,7 +93,15 @@ final class Hub {
     /// Connected extension instances by Safari profile id.
     private(set) var instances: [String: ExtensionInstance] = [:]
     /// Recent connect/disconnect events (diagnostics only; no page data).
-    private(set) var connectionLog: [String] = []
+    /// Written on the hub queue, read from the main thread (settings window), so every
+    /// access goes through a lock: an unsynchronized read while the hub replaces the array
+    /// corrupts its reference count and crashed Orbit (1.1.5).
+    private let sharedStateLock = NSLock()
+    private var _connectionLog: [String] = []
+    private(set) var connectionLog: [String] {
+        get { sharedStateLock.withLock { _connectionLog } }
+        set { sharedStateLock.withLock { _connectionLog = newValue } }
+    }
     /// Browser tool catalog: provided by the extension, with a bundled copy as fallback.
     private(set) var browserTools: [JSONObject] = {
         guard let url = Bundle.main.url(forResource: "tools", withExtension: "json"),
@@ -113,7 +121,11 @@ final class Hub {
 
     /// Observed by the status UI (called on the main thread).
     var onStatusChange: (() -> Void)?
-    private(set) var lastProviderStatus: [JSONObject] = []
+    private var _lastProviderStatus: [JSONObject] = []
+    private(set) var lastProviderStatus: [JSONObject] {
+        get { sharedStateLock.withLock { _lastProviderStatus } }
+        set { sharedStateLock.withLock { _lastProviderStatus = newValue } }
+    }
     var extensionConnected: Bool { !instances.isEmpty }
 
     private init() {

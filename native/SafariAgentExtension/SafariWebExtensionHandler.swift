@@ -56,8 +56,12 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     }
 
     private static func launchHelper() {
-        // The extension lives in <App>.app/Contents/PlugIns/<Ext>.appex
-        let appURL = Bundle.main.bundleURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        // Prefer the copy macOS knows as Orbit (the installed one): the extension itself may
+        // run from a stale build folder. Otherwise use the app that contains this extension
+        // (<App>.app/Contents/PlugIns/<Ext>.appex).
+        let container = Bundle.main.bundleURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let registered = NSWorkspace.shared.urlForApplication(withBundleIdentifier: appBundleId)
+        let appURL = registered.flatMap { $0.path.contains("/DerivedData/") ? nil : $0 } ?? container
         let config = NSWorkspace.OpenConfiguration()
         config.activates = false
         config.addsToRecentItems = false
