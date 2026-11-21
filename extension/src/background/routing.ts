@@ -79,7 +79,12 @@ export class RoutingEngine {
     if (!c || !c.routing.active || Date.now() < this.pausedUntil || !/^https?:/i.test(url)) return null;
     if (c.routing.pausedUntil && c.routing.pausedUntil * 1000 > Date.now()) return null;
     const t = routeTarget(url, c.routing.rules);
-    if (!t || t === c.profileId || !c.profiles.some((p) => p.id === t)) return null;
+    if (!t || t === c.profileId) return null;
+    const to = c.profiles.find((p) => p.id === t);
+    if (!to) return null;
+    // An older entry of this same Safari profile: the page is already where it belongs.
+    const me = c.profiles.find((p) => p.id === c.profileId);
+    if (me?.safariName && me.safariName === to.safariName) return null;
     return t;
   }
 
@@ -95,6 +100,21 @@ export class RoutingEngine {
   /** The next navigation of this tab stays here (within 20 s). */
   exemptNext(tabId: number) {
     this.exempt.set(tabId, Date.now() + 20000);
+  }
+
+  /** URLs about to be opened here on purpose (sent from another profile): their tab's
+   *  first navigation can start before the tab id is known, so they are matched by URL. */
+  private exemptUrls = new Map<string, number>();
+  exemptUrl(url: string) {
+    this.exemptUrls.set(url.split("#")[0], Date.now() + 10000);
+  }
+  private takeExemptUrl(url: string) {
+    const now = Date.now();
+    for (const [k, t] of this.exemptUrls) if (t < now) this.exemptUrls.delete(k);
+    const key = url.split("#")[0];
+    if (!this.exemptUrls.has(key)) return false;
+    this.exemptUrls.delete(key);
+    return true;
   }
 
   private isEmptyTab(tabId: number) {
@@ -116,9 +136,13 @@ export class RoutingEngine {
     const until = this.exempt.get(d.tabId);
     if (until !== undefined) {
       this.exempt.delete(d.tabId);
-      if (until > Date.now()) return;
+      if (until > Date.now()) {
+        this.takeExemptUrl(d.url);
+        return;
+      }
     }
     if (this.deps.isAgentTab(d.tabId)) return;
+    if (this.takeExemptUrl(d.url)) return;
     const started = Date.now();
     // Woken up by this navigation? Wait for the rules (a few ms) instead of missing it.
     if (!this.cfg()) await this.deps.ready();
@@ -127,7 +151,10 @@ export class RoutingEngine {
     const c = this.cfg()!;
     await this.seeded;
     const prev = this.tabPages.get(d.tabId);
-    const known = prev !== undefined && prev.split("#")[0] !== d.url.split("#")[0];
+    // The tab reloads the page it already shows (a reload, or Safari restoring the tab at
+    // launch): the page is meant to be here — the user kept it, or chose "Open Here".
+    if (prev !== undefined && prev.split("#")[0] === d.url.split("#")[0]) return;
+    const known = prev !== undefined;
     const fresh = (this.created.get(d.tabId) ?? 0) > Date.now() - 15000 && prev === undefined;
     const empty = fresh || (known && BLANK.test(prev!));
     if (!empty && known && c.routing.typedNavigation === "off") return;

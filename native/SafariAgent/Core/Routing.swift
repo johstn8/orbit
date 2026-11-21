@@ -65,7 +65,9 @@ final class Router {
     static let shared = Router()
 
     /// Recently routed URLs, to stop loops (A → B → A …).
-    private var recent: [(url: String, to: String, at: Date)] = []
+    /// Used from the hub queue and the main thread.
+    private var recent: [(url: String, to: String, at: Date, from: String?)] = []
+    private let recentLock = NSLock()
 
     // MARK: requests from extension instances (hub queue)
 
@@ -75,13 +77,29 @@ final class Router {
             guard let raw = p["url"] as? String, let url = URL(string: raw), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
                   let target = p["profileId"] as? String else { return reply(.failure(AgentError("bad_request", "Invalid route."))) }
             let now = Date()
+            let s = SettingsStore.shared.current
+            // Two ids of the same Safari profile (an old entry and the current one).
+            let same = { (a: String, b: String) -> Bool in
+                guard a != b else { return true }
+                guard let x = s.profile(a), let y = s.profile(b) else { return false }
+                return (x.detectedName ?? x.name) == (y.detectedName ?? y.name)
+            }
+            // Loop guards:
+            // - the same URL was just routed *to* the profile that now wants to route it away;
+            // - the target is the asking profile itself under another id (same Safari profile);
+            // - another profile asks to send a URL to where it was just sent (the new tab there
+            //   asks again, e.g. because that window's instance doesn't know yet which profile it is).
+            recentLock.lock()
             recent.removeAll { now.timeIntervalSince($0.at) > 15 }
-            // Loop guard: the same URL was just routed *to* the profile that now wants to route it away.
-            if let profile, recent.contains(where: { $0.url == raw && $0.to == profile }) {
+            let toAsker = profile.map { p in recent.contains { $0.url == raw && same($0.to, p) } } ?? false
+            let sameProfile = profile.map { same($0, target) } ?? false
+            let repeated = recent.contains { $0.url == raw && $0.to == target && $0.from != profile && now.timeIntervalSince($0.at) < 6 }
+            if !(toAsker || sameProfile || repeated) { recent.append((raw, target, now, profile)) }
+            recentLock.unlock()
+            if toAsker || sameProfile || repeated {
                 Log.routing.notice("route loop prevented")
                 return reply(.success(["ok": false, "loop": true]))
             }
-            recent.append((raw, target, now))
             Task {
                 let outcome = await SafariController.open(url, profileId: target, newWindow: p["newWindow"] as? Bool ?? false, openAnywayOnFailure: false)
                 switch outcome {
@@ -146,7 +164,7 @@ final class Router {
 
     @MainActor
     func open(_ url: URL, in profileId: String) {
-        recent.append((url.absoluteString, profileId, Date()))
+        recentLock.withLock { recent.append((url.absoluteString, profileId, Date(), nil)) }
         Task {
             if case .fallback(let notice) = await SafariController.open(url, profileId: profileId) {
                 await MainActor.run { AppDelegate.shared?.notify(notice) }

@@ -111,6 +111,8 @@ export interface ProfileInfo {
   name: string;
   symbol?: string;
   color?: string;
+  /** The Safari profile this entry stands for (two entries can share one after an id change). */
+  safariName?: string;
 }
 
 /** Configuration the native app pushes to each extension instance (no secrets). */

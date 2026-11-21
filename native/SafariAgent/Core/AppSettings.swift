@@ -251,7 +251,7 @@ extension AppSettings {
         }
         return [
             "profileId": profileId,
-            "profiles": orderedProfiles.map { ["id": $0.id, "name": $0.name, "symbol": $0.symbol, "color": $0.color] },
+            "profiles": orderedProfiles.map { ["id": $0.id, "name": $0.name, "symbol": $0.symbol, "color": $0.color, "safariName": $0.detectedName ?? $0.name] },
             "routing": [
                 "active": routingActive,
                 "pausedUntil": routing.pausedUntil,

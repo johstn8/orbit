@@ -147,6 +147,18 @@ The prompt-free real-Safari checks verify:
 - **Cause:** Orbit makes room for fixed layers (app shells, headers) when it scans the page and when the page changes its elements. While a tab is hidden, Safari runs no animation frames, so apps such as chatgpt.com finish their layout only after the tab is shown again, often without changing any attribute. Layers measured while hidden (often 0 wide) were never measured again and stayed under the sidebar.
 - **Fix:** when a tab becomes visible again (and on `pageshow`, and on window focus at most every 3 s), Orbit re-applies the page margin and rescans now, after 0.4 s and after 1.5 s. It also watches `<head>`, so a site that rebuilds it can't drop the margin style.
 
+## 1.1.8: a routed site opened over and over
+
+- **Cause:** a Safari profile's extension instance had been registered under several ids (old entries stayed behind after it got a new one). A rule still pointed at an old "Universität" entry, so the Universität window's own instance saw tum.de pages as belonging to another profile and sent them to "Universität", which opened them in that same window, where they were routed again: an endless loop of new tabs. The helper's loop guard only caught A → B → A with identical ids.
+- **Fixes:**
+  - Entries left behind by a Safari profile (same name, instance not connected) are merged into the current one when the instance is matched to its profile and at each sync; rules and shared logins follow.
+  - The extension doesn't route to an entry of its own Safari profile.
+  - The helper refuses routes to the asking profile itself (by Safari name), and a second profile asking to route a URL that was just sent to the same profile.
+  - A tab reloading the page it shows (a reload, or Safari restoring tabs at launch) is never routed, so restarting Safari no longer opens restored pages again in another profile.
+  - Tabs opened on another profile's request are exempt by URL too (their first navigation can start before the tab id is known).
+  - The helper's routing history is locked (it was used from two threads).
+- **Sidebar:** which tabs have the sidebar open and which tabs the agent may use were stored by tab id across Safari restarts, when the ids belong to other tabs. They are now kept in session storage (cleared when Safari quits).
+
 ## Remaining limitations
 
 - **Profile identity and names:**

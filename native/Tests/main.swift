@@ -305,5 +305,24 @@ do {
     check(SessionSharing.conflicts(for: st.sharing[0], in: st).contains("B"), "“all other profiles” overlaps too")
 }
 
+do {
+    // A Safari profile's instance got a new id: the old entries (same name) are folded in.
+    var st = AppSettings()
+    st.profiles = [
+        ProfileConfig(id: "OLD-UNI", name: "Uni", symbol: "star", color: "#000000", order: 1),
+        ProfileConfig(id: "local-old", name: "Uni", symbol: "star", color: "#000000", order: 2),
+        ProfileConfig(id: "NEW-UNI", name: "Uni", symbol: "star", color: "#000000", order: 3, detectedName: "Uni"),
+        ProfileConfig(id: "LIVE-UNI", name: "Uni", symbol: "star", color: "#000000", order: 4),
+        ProfileConfig(id: "QUANT", name: "Quant", symbol: "star", color: "#000000", order: 5, detectedName: "Quant"),
+    ]
+    st.routing.rules = [RoutingRule(pattern: "tum.de", profileId: "OLD-UNI"), RoutingRule(pattern: "q.com", profileId: "QUANT")]
+    st.sharing = [SharedSite(domain: "tum.de", sourceProfileId: "local-old", targets: ["OLD-UNI", "QUANT"])]
+    ProfileRegistry.absorbStale(&st, into: "NEW-UNI", name: "Uni", connected: ["LIVE-UNI"])
+    check(st.routing.rules[0].profileId == "NEW-UNI" && st.routing.rules[1].profileId == "QUANT", "rule pointing at a stale profile id is redirected")
+    check(st.sharing[0].sourceProfileId == "NEW-UNI" && st.sharing[0].targets == ["NEW-UNI", "QUANT"], "shared login ids are redirected")
+    check(st.profile("OLD-UNI") == nil && st.profile("local-old") == nil, "stale entries are removed")
+    check(st.profile("LIVE-UNI") != nil && st.profile("QUANT") != nil, "connected and unrelated profiles are kept")
+}
+
 print("\n\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

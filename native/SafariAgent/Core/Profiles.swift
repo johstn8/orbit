@@ -76,6 +76,11 @@ final class ProfileRegistry: ObservableObject {
             st.profiles.removeAll { $0.id == new && $0.detectedName == nil }
             if let j = st.profiles.firstIndex(where: { $0.id == old }) { st.profiles[j].id = new } else { st.profiles[i].id = new }
         }
+        redirect(&st, from: old, to: new)
+    }
+
+    /// Point rules, shared logins and the last picked profile at `new` instead of `old`.
+    static func redirect(_ st: inout AppSettings, from old: String, to new: String) {
         for j in st.routing.rules.indices where st.routing.rules[j].profileId == old { st.routing.rules[j].profileId = new }
         for j in st.sharing.indices {
             if st.sharing[j].sourceProfileId == old { st.sharing[j].sourceProfileId = new }
@@ -97,8 +102,12 @@ final class ProfileRegistry: ObservableObject {
     func link(instance id: String, toSafariName name: String) {
         let s = SettingsStore.shared.current
         if s.profile(id)?.detectedName == name { return }
+        let live = connected
         SettingsStore.shared.update { st in
-            // Another entry claimed this name before (stale): it isn't this profile.
+            // Entries this Safari profile had before its instance got a new id: fold them in,
+            // so rules that still point at them keep working (and don't route back here).
+            Self.absorbStale(&st, into: id, name: name, connected: live)
+            // Another connected entry claimed this name before: it isn't this profile.
             for j in st.profiles.indices where st.profiles[j].detectedName == name && st.profiles[j].id != id && !st.profiles[j].id.hasPrefix(Self.placeholderPrefix) {
                 st.profiles[j].detectedName = nil
             }
@@ -116,6 +125,26 @@ final class ProfileRegistry: ObservableObject {
             }
         }
         Log.profiles.info("matched a Safari profile instance to its name")
+    }
+
+    /// Fold entries left behind by the Safari profile `name` into the entry `id`: entries
+    /// with that Safari name (or, unmatched, that name) whose extension instance isn't
+    /// connected. Safari can give a profile's extension instance a new id (for example after
+    /// the extension was reinstalled); the old entry then stays behind, and a rule that
+    /// still points at it would send the profile's own pages to itself, over and over.
+    static func absorbStale(_ st: inout AppSettings, into id: String, name: String, connected: Set<String>) {
+        guard st.profile(id) != nil else { return }
+        let stale = st.profiles.filter { p in
+            p.id != id && !p.id.hasPrefix(placeholderPrefix) && !connected.contains(p.id)
+                && (p.detectedName == name || (p.detectedName == nil && p.name == name))
+        }
+        for old in stale {
+            if let i = st.profiles.firstIndex(where: { $0.id == id }), !st.profiles[i].custom, old.custom {
+                st.profiles[i].custom = true; st.profiles[i].name = old.name; st.profiles[i].symbol = old.symbol; st.profiles[i].color = old.color
+            }
+            st.profiles.removeAll { $0.id == old.id }
+            redirect(&st, from: old.id, to: id)
+        }
     }
 
     func windowCreated(_ id: String) { windowCreations.append((Date(), id)) }
@@ -172,6 +201,7 @@ final class ProfileRegistry: ObservableObject {
             return i
         }
         let names = menu.map(\.name)
+        let live = connected
         SettingsStore.shared.update { st in
             // The default profile's instance (stored id) is the profile Safari marks as default.
             if let defaultName, !st.profiles.contains(where: { $0.detectedName == defaultName }),
@@ -213,6 +243,11 @@ final class ProfileRegistry: ObservableObject {
                         if real.custom { st.profiles[i].name = real.name; st.profiles[i].symbol = real.symbol; st.profiles[i].color = real.color }
                     }
                 }
+            }
+            // Entries left behind by profiles whose instance now has a new id.
+            for name in names {
+                guard let real = st.profiles.first(where: { $0.detectedName == name && !$0.id.hasPrefix(Self.placeholderPrefix) }) else { continue }
+                Self.absorbStale(&st, into: real.id, name: name, connected: live)
             }
             for i in st.profiles.indices {
                 guard let n = st.profiles[i].detectedName, names.contains(n) else { continue }

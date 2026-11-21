@@ -51,12 +51,28 @@ const nativeSidePanel = !!(browser.sidePanel && typeof browser.sidePanel.open ==
 const nativeSidebar = !!(browser.sidebarAction && typeof browser.sidebarAction.open === "function");
 state.sidePanelMode = nativeSidePanel || nativeSidebar ? "native" : "page";
 
+// Tab ids only mean something until Safari quits: after a restart they belong to other
+// tabs. Whatever is keyed by tab id (where the sidebar is open, which tabs the agent may
+// use) is kept in session storage, which survives the background going to sleep but not
+// a Safari restart. Without session storage it is cleared when the profile starts.
+const tabStore = browser.storage.session ?? browser.storage.local;
+const TAB_KEYS = ["panelTabs", "allowedTabs", "agentTabs"];
+if (browser.storage.session) browser.storage.local.remove(TAB_KEYS).catch(() => {});
+else browser.runtime.onStartup?.addListener(() => {
+  panelTabs.clear();
+  allowedTabs.clear();
+  agentTabs.clear();
+  browser.storage.local.remove(TAB_KEYS).catch(() => {});
+});
+
 async function loadPersisted() {
   try {
-    const s = await browser.storage.local.get(["settings", "panelTabs", "lastConversationId", "allowedTabs", "orbitConfig", "providersCache", "agentAccess"]);
+    const t = await tabStore.get(TAB_KEYS).catch(() => ({}));
+    const s = await browser.storage.local.get(["settings", "lastConversationId", "orbitConfig", "providersCache", "agentAccess"]);
     if (s.settings) state.settings = { ...DEFAULT_SETTINGS, ...s.settings, models: { ...(s.settings.models || {}) }, effort: { ...(s.settings.effort || {}) } };
-    for (const id of s.panelTabs || []) panelTabs.add(id);
-    for (const [k, v] of Object.entries(s.allowedTabs || {})) allowedTabs.set(k, new Set(v as number[]));
+    for (const id of t.panelTabs || []) panelTabs.add(id);
+    for (const [k, v] of Object.entries(t.allowedTabs || {})) allowedTabs.set(k, new Set(v as number[]));
+    for (const [k, v] of Object.entries(t.agentTabs || {})) if (!agentTabs.has(k)) agentTabs.set(k, v as any);
     if (s.orbitConfig && !instanceConfig) instanceConfig = s.orbitConfig;
     // Show the last known providers right away; the helper refreshes them.
     if (s.providersCache && !state.providers.length) state.providers = s.providersCache;
@@ -72,7 +88,7 @@ function saveSettings() {
   browser.storage.local.set({ settings: state.settings }).catch(() => {});
 }
 function savePanelTabs() {
-  browser.storage.local.set({ panelTabs: [...panelTabs] }).catch(() => {});
+  tabStore.set({ panelTabs: [...panelTabs] }).catch(() => {});
 }
 function allowTab(conversationId: string, tabId: number) {
   let set = allowedTabs.get(conversationId);
@@ -80,7 +96,7 @@ function allowTab(conversationId: string, tabId: number) {
   set.add(tabId);
   const obj: Record<string, number[]> = {};
   for (const [k, v] of allowedTabs) obj[k] = [...v];
-  browser.storage.local.set({ allowedTabs: obj }).catch(() => {});
+  tabStore.set({ allowedTabs: obj }).catch(() => {});
 }
 
 // ---------------- panel broadcast ----------------
@@ -161,14 +177,11 @@ const executor = new ToolExecutor({
       savePanelTabs();
       browser.tabs.get(tabId).then((t: any) => showPanelIn(t)).catch(() => {});
     }
-    browser.storage.local.set({ agentTabs: Object.fromEntries(agentTabs) }).catch(() => {});
+    tabStore.set({ agentTabs: Object.fromEntries(agentTabs) }).catch(() => {});
   },
   setIndicator,
 });
 
-browser.storage.local.get("agentTabs").then((s: any) => {
-  for (const [k, v] of Object.entries(s.agentTabs || {})) if (!agentTabs.has(k)) agentTabs.set(k, v as any);
-}).catch(() => {});
 
 async function refreshAfterConnect() {
   const lastId = await persistedReady;
@@ -249,7 +262,7 @@ function onHelperMessage(msg: any) {
       if (typeof msg.tabId === "number") {
         agentTabs.set(msg.conversationId, { tabId: msg.tabId, windowId: typeof msg.windowId === "number" ? msg.windowId : undefined });
         allowTab(msg.conversationId, msg.tabId);
-        browser.storage.local.set({ agentTabs: Object.fromEntries(agentTabs) }).catch(() => {});
+        tabStore.set({ agentTabs: Object.fromEntries(agentTabs) }).catch(() => {});
       }
       break;
   }
@@ -274,6 +287,8 @@ async function handleCall(msg: any): Promise<any> {
       const url = String(p.url || "");
       if (!/^https?:/i.test(url)) throw new Error("Only web links can be opened.");
       const win = p.newWindow ? null : await mruWindow();
+      // Its first navigation can fire before tabs.create returns the tab id.
+      routing.exemptUrl(url);
       if (win) {
         const tab = await browser.tabs.create({ windowId: win.id, url, active: true });
         routing.exemptNext(tab.id);
@@ -815,7 +830,8 @@ async function handlePanelMessage(msg: PanelToBackground, port: any) {
         if (ctx?.tabId !== undefined) {
           agentTabs.set(res.conversationId, { tabId: ctx.tabId, windowId: ctx.windowId });
           allowTab(res.conversationId, ctx.tabId);
-          browser.storage.local.set({ agentTabs: Object.fromEntries(agentTabs), lastConversationId: res.conversationId }).catch(() => {});
+          tabStore.set({ agentTabs: Object.fromEntries(agentTabs) }).catch(() => {});
+          browser.storage.local.set({ lastConversationId: res.conversationId }).catch(() => {});
         }
       } catch (e: any) {
         state.running = false;
