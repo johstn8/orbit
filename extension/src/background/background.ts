@@ -341,7 +341,7 @@ async function handleCall(msg: any): Promise<any> {
     case "cookies_export":
       return sessions.exportCookies((p.domains || []).map(String));
     case "cookies_import":
-      return sessions.importCookies((p.domains || []).map(String), p.cookies || [], (p.excluded || []).map(String));
+      return sessions.importCookies((p.domains || []).map(String), p.cookies || [], (p.excluded || []).map(String), p.mirror !== false);
     case "panel": {
       const tab = await activeTab();
       await setPanelInTab(tab, p.open !== false);
@@ -573,7 +573,12 @@ async function currentContext(includeSelection: boolean, preferTabId?: number): 
 browser.windows?.onFocusChanged?.addListener((id: number) => {
   if (id === undefined || id < 0 || id === detachedWindowId) return;
   lastFocusedWindowId = id;
-  sendEvent("window_focused");
+  // The window's size lets Orbit check that the Safari window in front really is this one
+  // before it learns which profile this instance belongs to.
+  browser.windows.get(id).then(
+    (w: any) => sendEvent("window_focused", { left: w?.left, width: w?.width, height: w?.height }),
+    () => sendEvent("window_focused"),
+  );
 });
 browser.windows?.onCreated?.addListener((w: any) => {
   if (w?.type && w.type !== "normal") return;

@@ -85,16 +85,24 @@ final class ProfileRegistry: ObservableObject {
         for j in st.sharing.indices {
             if st.sharing[j].sourceProfileId == old { st.sharing[j].sourceProfileId = new }
             st.sharing[j].targets = st.sharing[j].targets.map { $0 == old ? new : $0 }
+            if st.sharing[j].newestIn == old { st.sharing[j].newestIn = new }
+            if let t = st.sharing[j].syncedTargets.removeValue(forKey: old) { st.sharing[j].syncedTargets[new] = max(t, st.sharing[j].syncedTargets[new] ?? 0) }
         }
         if st.lastPickedProfile == old { st.lastPickedProfile = new }
     }
 
     /// A window of an instance's profile got focus: learn which Safari profile that is.
-    func profileFocused(_ id: String) {
+    func profileFocused(_ id: String, left: Double? = nil, size: CGSize? = nil) {
         lastFocusedProfile = id
         guard accessibilityTrusted else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            guard let name = SafariAX.focusedWindowProfile()?.name else { return }
+            guard let front = SafariAX.focusedWindow(), let name = SafariAX.profile(of: front)?.name else { return }
+            // The event can arrive late (a sleeping extension wakes up first): only learn the
+            // profile when the window in front is the one that got focus, or a quick switch
+            // to another window would attach this instance to the wrong profile.
+            if let size, let f = SafariAX.frame(of: front) {
+                guard abs(f.width - size.width) < 4, abs(f.height - size.height) < 4, left.map({ abs(f.minX - $0) < 4 }) ?? true else { return }
+            }
             self.link(instance: id, toSafariName: name)
         }
     }
@@ -421,6 +429,11 @@ enum SafariAX {
             guard (attr(w, kAXSubroleAttribute) as? String) == "AXStandardWindow", let p = profile(of: w) else { return nil }
             return WindowInfo(element: w, name: p.name, icon: p.icon)
         }
+    }
+
+    static func focusedWindow() -> AXUIElement? {
+        guard let app = safariElement(), let w = attr(app, kAXFocusedWindowAttribute) else { return nil }
+        return (w as! AXUIElement)
     }
 
     static func focusedWindowProfile() -> (name: String, icon: String?)? {

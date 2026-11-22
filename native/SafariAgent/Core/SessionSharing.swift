@@ -49,30 +49,63 @@ final class SessionSharing {
         }
     }
 
-    /// The source profile reported changed cookies for a domain.
+    /// Profiles that share this login: the source and its targets.
+    func members(_ site: SharedSite, settings: AppSettings) -> [String] {
+        [site.sourceProfileId] + targets(site, settings: settings)
+    }
+
+    /// The profile with the newest copy of the login: the one whose cookies changed last.
+    func newest(_ site: SharedSite, settings: AppSettings) -> String {
+        if let n = site.newestIn, members(site, settings: settings).contains(n) { return n }
+        return site.sourceProfileId
+    }
+
+    /// Per site: profiles known to hold the newest copy (in memory; after a restart only the
+    /// newest holder is known to be current).
+    private var current: [String: Set<String>] = [:]
+    /// Per site: bumped on every reported change, so a copy that was on its way while a newer
+    /// one appeared isn't counted as the newest.
+    private var generation: [String: Int] = [:]
+
+    /// A profile sharing the login reported changed cookies for a domain. Sites like Google
+    /// and ChatGPT replace their session cookies every few minutes in the profile in use, and
+    /// treat an already replaced cookie that shows up again as stolen (they end the session
+    /// everywhere). So the newest copy always wins: it is passed on from whichever profile
+    /// has it, and an older copy is never written over it.
     func cookiesChanged(profile: String, domain: String) {
         let s = SettingsStore.shared.current
-        for site in s.sharing where site.enabled && site.sourceProfileId == profile && domains(site).contains(where: { domain == $0 || domain.hasSuffix("." + $0) }) {
+        for site in s.sharing where site.enabled && domains(site).contains(where: { domain == $0 || domain.hasSuffix("." + $0) }) {
+            guard members(site, settings: s).contains(profile) else { continue }
+            // A target that never received the login only has its own (signed-out) cookies.
+            if profile != site.sourceProfileId && site.syncedTargets[profile] == nil { continue }
+            current[site.id] = [profile]
+            generation[site.id, default: 0] += 1
+            cache[site.id] = nil
+            if site.newestIn != profile && !(site.newestIn == nil && profile == site.sourceProfileId) {
+                SettingsStore.shared.update { st in
+                    if let i = st.sharing.firstIndex(where: { $0.id == site.id }) { st.sharing[i].newestIn = profile == site.sourceProfileId ? nil : profile }
+                }
+            }
             schedule(site.id, delay: 3)
         }
     }
 
-    /// A profile connected: bring its shared logins up to date.
+    /// A profile connected: bring its shared logins up to date (or pass its newer copy on).
     func instanceConnected(_ profile: String) {
         let s = SettingsStore.shared.current
-        for site in s.sharing where site.enabled && (site.sourceProfileId == profile || targets(site, settings: s).contains(profile)) {
-            schedule(site.id, delay: 2)
+        for site in s.sharing where site.enabled && members(site, settings: s).contains(profile) {
+            if newest(site, settings: s) == profile || !(current[site.id]?.contains(profile) ?? false) { schedule(site.id, delay: 2) }
         }
     }
 
     /// You're using a window of this profile: Safari now tells its cookie store, so bring
-    /// logins it receives up to date (at most every 10 minutes per site, unless the last try failed).
+    /// logins it receives up to date — only when it doesn't have the newest copy yet
+    /// (or the last try failed). Writing the same login again would be at best useless.
     func profileActive(_ profile: String) {
         let s = SettingsStore.shared.current
-        let now = Date().timeIntervalSince1970
-        for site in s.sharing where site.enabled && targets(site, settings: s).contains(profile) {
+        for site in s.sharing where site.enabled && members(site, settings: s).contains(profile) {
             let ok = (site.lastResult ?? "").hasPrefix("Shared with") && !(site.lastResult ?? "").contains("will update")
-            if !ok || now - (site.lastSync ?? 0) > 600 { schedule(site.id, delay: 1.5) }
+            if !ok || !(current[site.id]?.contains(profile) ?? false) { schedule(site.id, delay: 1.5) }
         }
     }
 
@@ -97,28 +130,34 @@ final class SessionSharing {
 
     // MARK: sync
 
-    /// The source profile's last exported login per site, kept in memory only (never on
-    /// disk), so target profiles can be updated while the source profile's extension sleeps.
+    /// The newest exported login per site, kept in memory only (never on disk), so other
+    /// profiles can be updated while the extension of the profile that has it sleeps.
+    /// Dropped as soon as any profile reports a change, so it is never older than a copy
+    /// a profile already has.
     private var cache: [String: (cookies: [JSONObject], at: Date, source: String)] = [:]
-    private static let cacheLifetime: TimeInterval = 12 * 3600
+    private static let cacheLifetime: TimeInterval = 3600
 
     func sync(_ siteId: String, completion: ((String) -> Void)?) {
         let s = SettingsStore.shared.current
         guard let site = s.sharing.first(where: { $0.id == siteId }), site.enabled, !site.domain.isEmpty else { completion?("Sharing is off."); return }
         let doms = domains(site)
-        let sourceName = s.profile(site.sourceProfileId)?.name ?? "the source profile"
+        // Export from the profile with the newest copy (the source unless another profile's
+        // copy changed since).
+        let from = newest(site, settings: s)
+        let sourceName = s.profile(from)?.name ?? "the source profile"
         let fromCache = { [weak self] () -> Bool in
-            guard let self, let c = self.cache[site.id], c.source == site.sourceProfileId, Date().timeIntervalSince(c.at) < Self.cacheLifetime else { return false }
-            self.distribute(site, c.cookies, settings: s, completion: completion)
+            guard let self, let c = self.cache[site.id], c.source == from, Date().timeIntervalSince(c.at) < Self.cacheLifetime else { return false }
+            self.distribute(site, c.cookies, from: from, settings: s, completion: completion)
             return true
         }
-        guard hub.instances[site.sourceProfileId] != nil else {
+        guard hub.instances[from] != nil else {
             if fromCache() { return }
             let had = targets(site, settings: s).filter { site.syncedTargets[$0] != nil }.compactMap { s.profile($0)?.name }.sorted()
             finish(site, had.isEmpty ? "Waiting for \(sourceName) to be in use in Safari." : "Shared with \(had.joined(separator: ", ")). New changes follow when \(sourceName) is in use.", completion)
             return
         }
-        hub.callInstance(site.sourceProfileId, "cookies_export", ["domains": doms], timeout: 10) { [weak self] r in
+        let startGen = generation[site.id, default: 0]
+        hub.callInstance(from, "cookies_export", ["domains": doms], timeout: 10) { [weak self] r in
             guard let self else { return }
             guard case .success(let v) = r, let o = v as? JSONObject, let cookies = o["cookies"] as? [JSONObject] else {
                 if fromCache() { return }
@@ -132,15 +171,20 @@ final class SessionSharing {
                 self.finish(site, "No login found in \(sourceName). Sign in there first.", completion)
                 return
             }
-            self.cache[site.id] = (filtered, Date(), site.sourceProfileId)
-            self.distribute(site, filtered, settings: s, completion: completion)
+            self.cache[site.id] = (filtered, Date(), from)
+            if self.generation[site.id, default: 0] == startGen { self.current[site.id, default: []].insert(from) }
+            self.distribute(site, filtered, from: from, settings: s, completion: completion)
         }
     }
 
-    private func distribute(_ site: SharedSite, _ filtered: [JSONObject], settings s: AppSettings, completion: ((String) -> Void)?) {
+    private func distribute(_ site: SharedSite, _ filtered: [JSONObject], from: String, settings s: AppSettings, completion: ((String) -> Void)?) {
         let doms = domains(site)
         let excluded = Set(site.excludedCookies.map { $0.lowercased() })
-        let targetIds = targets(site, settings: s)
+        let targetIds = members(site, settings: s).filter { $0 != from }
+        // Only the source's copy removes cookies the others have and it doesn't (a sign-out
+        // there signs out everywhere); a newer copy from another profile only updates.
+        let mirror = from == site.sourceProfileId
+        let gen = generation[site.id, default: 0]
         let group = DispatchGroup()
         var done: [String] = []
         var doneIds: [String] = []
@@ -148,13 +192,15 @@ final class SessionSharing {
         var problems: [String] = []
         for t in targetIds {
             let name = s.profile(t)?.name ?? "Profile"
+            // Already holds this very copy: writing it again would gain nothing.
+            if current[site.id]?.contains(t) == true { done.append(name); continue }
             guard hub.instances[t] != nil else {
                 // Asleep now, but it already has this login from an earlier sync.
                 if site.syncedTargets[t] != nil { done.append(name) } else { waiting.append(name) }
                 continue
             }
             group.enter()
-            hub.callInstance(t, "cookies_import", ["domains": doms, "cookies": filtered, "excluded": Array(excluded)], timeout: 20) { r in
+            hub.callInstance(t, "cookies_import", ["domains": doms, "cookies": filtered, "excluded": Array(excluded), "mirror": mirror], timeout: 20) { r in
                 switch r {
                 case .success(let v):
                     // Count it only when the target's store really holds the source's values now.
@@ -164,8 +210,10 @@ final class SessionSharing {
                     // A login is shared when everything arrived, or only minor cookies (not
                     // session/auth ones) were refused by Safari.
                     let critical = missing.filter { n in ["session", "auth", "token", "sid", "login", "user"].contains { n.lowercased().contains($0) } }
-                    if expected == 0 || verified >= expected { done.append(name); doneIds.append(t) }
-                    else if critical.isEmpty && verified * 10 >= expected * 9 { done.append(name); doneIds.append(t) }
+                    if expected == 0 || verified >= expected || (critical.isEmpty && verified * 10 >= expected * 9) {
+                        done.append(name); doneIds.append(t)
+                        if self.generation[site.id, default: 0] == gen { self.current[site.id, default: []].insert(t) }
+                    }
                     else { problems.append("\(name): \(verified) of \(expected) cookies arrived (missing \(missing.prefix(3).joined(separator: ", ")))") }
                 case .failure(let e):
                     if e.message.contains("no open tab") {
@@ -187,7 +235,7 @@ final class SessionSharing {
     private func finish(_ site: SharedSite, _ result: String, syncedNow: [String] = [], _ completion: ((String) -> Void)?) {
         SettingsStore.shared.update { s in
             if let i = s.sharing.firstIndex(where: { $0.id == site.id }) {
-                for t in syncedNow { s.sharing[i].syncedTargets[t] = Date().timeIntervalSince1970 }
+                for t in syncedNow where t != s.sharing[i].sourceProfileId { s.sharing[i].syncedTargets[t] = Date().timeIntervalSince1970 }
                 s.sharing[i].lastSync = Date().timeIntervalSince1970
                 s.sharing[i].lastResult = result
             }

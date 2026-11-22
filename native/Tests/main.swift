@@ -324,5 +324,23 @@ do {
     check(st.profile("LIVE-UNI") != nil && st.profile("QUANT") != nil, "connected and unrelated profiles are kept")
 }
 
+do {
+    // Shared logins: the profile whose copy changed last is the one exported from.
+    var st = AppSettings()
+    st.profiles = ["A", "B", "C"].enumerated().map { ProfileConfig(id: $0.element, name: $0.element, symbol: "star", color: "#000000", order: $0.offset, detectedName: $0.element) }
+    var site = SharedSite(domain: "google.com", sourceProfileId: "A")
+    check(SessionSharing.shared.members(site, settings: st) == ["A", "B", "C"], "source and all other profiles share the login")
+    check(SessionSharing.shared.newest(site, settings: st) == "A", "without changes elsewhere the source has the newest copy")
+    site.newestIn = "C"
+    check(SessionSharing.shared.newest(site, settings: st) == "C", "a target whose copy changed last is exported from")
+    site.targets = ["B"]
+    check(SessionSharing.shared.newest(site, settings: st) == "A", "a profile no longer sharing the login is ignored")
+    var moved = st
+    moved.sharing = [SharedSite(domain: "x.com", sourceProfileId: "A")]
+    moved.sharing[0].newestIn = "OLD"; moved.sharing[0].syncedTargets = ["OLD": 5]
+    ProfileRegistry.redirect(&moved, from: "OLD", to: "B")
+    check(moved.sharing[0].newestIn == "B" && moved.sharing[0].syncedTargets["B"] == 5, "profile id changes carry the newest holder and sync state")
+}
+
 print("\n\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

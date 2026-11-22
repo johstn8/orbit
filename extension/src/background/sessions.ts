@@ -86,7 +86,11 @@ export class SessionSync {
       if (!c || !info?.cookie) return;
       if (this.store && info.cookie.storeId && info.cookie.storeId !== this.store) return;
       for (const site of c.sharing) {
-        if (site.sourceProfileId !== c.profileId) continue;
+        // The source and every target report changes: sites like Google and ChatGPT replace
+        // their session cookies in whichever profile is in use, and that newest copy must
+        // reach the others before an older one is written anywhere.
+        const member = site.sourceProfileId === c.profileId || !site.targets.length || site.targets.includes(c.profileId);
+        if (!member) continue;
         const domains = [site.domain, ...site.extraDomains].map((d) => d.toLowerCase());
         const hit = domains.find((d) => matches(info.cookie.domain, d));
         if (!hit) continue;
@@ -118,7 +122,7 @@ export class SessionSync {
     return { cookies: out, count: out.length };
   }
 
-  async importCookies(domains: string[], cookies: any[], excluded: string[]) {
+  async importCookies(domains: string[], cookies: any[], excluded: string[], mirror = true) {
     if (!this.available) throw new Error("Safari doesn't offer cookie access to extensions here.");
     const ex = new Set(excluded.map((n) => n.toLowerCase()));
     const storeId = await this.storeId();
@@ -150,8 +154,9 @@ export class SessionSync {
         }
       }
     }
-    // Mirror the login: remove this site's cookies that the source no longer has.
-    for (const domain of domains) {
+    // Mirror the login: remove this site's cookies that the source no longer has
+    // (only for the source's copy; a newer copy from another profile only updates).
+    for (const domain of mirror ? domains : []) {
       const list = await browser.cookies.getAll({ domain, ...inStore }).catch(() => []);
       for (const c of list || []) {
         if (c.partitionKey || ex.has(String(c.name).toLowerCase()) || !domains.some((d) => matches(c.domain, d))) continue;

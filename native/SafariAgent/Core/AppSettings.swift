@@ -92,6 +92,10 @@ struct SharedSite: Codable, Identifiable, Equatable, Hashable {
     var lastResult: String?
     /// When each target profile last received this login successfully.
     var syncedTargets: [String: Double] = [:]
+    /// The profile whose copy of the login changed last (sites like Google and ChatGPT
+    /// replace their session cookies every few minutes in whichever profile is in use).
+    /// Nil = the source.
+    var newestIn: String?
 
     init(id: String = UUID().uuidString, domain: String, extraDomains: [String] = [], sourceProfileId: String, targets: [String] = [], excludedCookies: [String] = [], enabled: Bool = true) {
         self.id = id; self.domain = domain; self.extraDomains = extraDomains; self.sourceProfileId = sourceProfileId
@@ -109,6 +113,7 @@ struct SharedSite: Codable, Identifiable, Equatable, Hashable {
         lastSync = try c.decodeIfPresent(Double.self, forKey: .lastSync)
         lastResult = try c.decodeIfPresent(String.self, forKey: .lastResult)
         syncedTargets = try c.decodeIfPresent([String: Double].self, forKey: .syncedTargets) ?? [:]
+        newestIn = try c.decodeIfPresent(String.self, forKey: .newestIn)
     }
 }
 

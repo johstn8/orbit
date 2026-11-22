@@ -371,7 +371,9 @@ final class Hub {
         case "window_focused":
             instances[profile]?.lastFocused = Date()
             SessionSharing.shared.profileActive(profile)
-            DispatchQueue.main.async { ProfileRegistry.shared.profileFocused(profile) }
+            let size = (data["width"] as? Double).flatMap { w in (data["height"] as? Double).map { CGSize(width: w, height: $0) } }
+            let left = data["left"] as? Double
+            DispatchQueue.main.async { ProfileRegistry.shared.profileFocused(profile, left: left, size: size) }
         case "window_created":
             DispatchQueue.main.async { ProfileRegistry.shared.windowCreated(profile) }
         case "visit":

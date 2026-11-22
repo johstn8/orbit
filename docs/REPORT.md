@@ -147,6 +147,16 @@ The prompt-free real-Safari checks verify:
 - **Cause:** Orbit makes room for fixed layers (app shells, headers) when it scans the page and when the page changes its elements. While a tab is hidden, Safari runs no animation frames, so apps such as chatgpt.com finish their layout only after the tab is shown again, often without changing any attribute. Layers measured while hidden (often 0 wide) were never measured again and stayed under the sidebar.
 - **Fix:** when a tab becomes visible again (and on `pageshow`, and on window focus at most every 3 s), Orbit re-applies the page margin and rescans now, after 0.4 s and after 1.5 s. It also watches `<head>`, so a site that rebuilds it can't drop the margin style.
 
+## 1.1.10: shared Google and ChatGPT logins signed out
+
+- **Cause:** shared logins were copied one way only, from the source to the targets, and again every 10 minutes while a target was in use, from an in-memory copy up to 12 hours old when the source's extension slept. Google and ChatGPT replace their session cookies every few minutes in whichever profile is in use, and treat an already replaced cookie that shows up again as a stolen session: they end it, in every profile. Copying an older login over a newer one did exactly that. Sites with long-lived cookies (GitHub, LinkedIn, Instagram) weren't affected.
+- **Fix — the newest copy wins:**
+  - Every profile that shares a login (source and targets that received it) reports cookie changes. The profile that changed last becomes the one exported from (remembered across restarts), and its copy goes to all others, the source included.
+  - A login is never written into a profile that already holds the newest copy, so there is no periodic re-copy any more. The in-memory copy is dropped on any change and kept for 1 hour at most, and a copy that was on its way while a newer one appeared isn't counted as current.
+  - Only the source's copy removes cookies (a sign-out there signs out everywhere); a newer copy from a target only updates, so a target can't sign the others out.
+  - Targets that never received the login are ignored (their signed-out cookies are their own).
+- **Profile identification:** an instance is only matched to a Safari profile when the window in front has the size and position of the window that got focus, so a late focus event (a sleeping extension waking up) can no longer attach it to the wrong profile.
+
 ## 1.1.9: picker focus, Floating Pearls, sidebar resizing, profile shortcut
 
 - **Settings window came forward with the picker:** macOS activates Orbit (the default browser) to open a link from another app, which raises all of Orbit's windows. When the settings window is open and Orbit was activated by the link, Orbit now hands the focus back to the app the link came from before showing the picker (which never needs Orbit to be active).
