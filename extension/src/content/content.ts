@@ -54,7 +54,7 @@ function main() {
       pushStyle.setAttribute("data-safari-agent", "");
       (document.head || document.documentElement).appendChild(pushStyle);
     }
-    pushStyle.textContent = `:root{--orbit-reserve:${reserve()}px}html{margin-right:var(--orbit-reserve) !important;${animate ? "transition:margin-right .25s cubic-bezier(.2,.8,.2,1);" : ""}}`;
+    pushStyle.textContent = `:root{--orbit-reserve:${reserve()}px}html{margin-right:var(--orbit-reserve) !important;width:auto !important;${animate ? "transition:margin-right .25s cubic-bezier(.2,.8,.2,1);" : ""}}`;
   };
 
   // ---------------- make room for fixed layers ----------------
@@ -82,12 +82,13 @@ function main() {
   };
   const ours = (el: Element) => el === panelHost || el.id === INDICATOR_ID || el.id === NOTICE_ID || el.tagName === "STYLE" || el.tagName === "SCRIPT";
 
-  let queue: Element[] = [];               // subtrees to walk (added nodes)
+  let queue: Node[] = [];                  // subtrees to walk (added nodes, open shadow roots)
+  let shadows = new WeakSet<ShadowRoot>();   // shadow roots the current observer watches
   const touched = new Set<Element>();     // single elements whose class/style changed
   let walker: TreeWalker | null = null;
   let sliceTimer: any = null;
   const schedule = () => { if (!sliceTimer) sliceTimer = setTimeout(runSlice, 60); };
-  const enqueue = (el: Element) => { queue.push(el); schedule(); };
+  const enqueue = (el: Node) => { queue.push(el); schedule(); };
   const touch = (el: Element) => { touched.add(el); schedule(); };
   const fullScan = () => {
     queue = [document.body || document.documentElement];
@@ -103,7 +104,16 @@ function main() {
     const edge = vw - reserve();
     const writes: (() => void)[] = [];
     const consider = (el: HTMLElement) => {
-      if (ours(el) || adjusted.has(el)) return;
+      if (ours(el)) return;
+      // Web components: their fixed headers and toolbars live in shadow roots, which
+      // neither the tree walk nor the page observer reach on their own.
+      const sr = el.shadowRoot;
+      if (sr && !shadows.has(sr)) {
+        shadows.add(sr);
+        queue.push(sr);
+        observer?.observe(sr, OBSERVE);
+      }
+      if (adjusted.has(el)) return;
       const cs = getComputedStyle(el);
       if (cs.display === "none") return;
       if (cs.position === "fixed") {
@@ -122,7 +132,8 @@ function main() {
           writes.push(() => setImp(el, "translate", "calc(-1 * var(--orbit-reserve)) 0", saved));
         }
         adjusted.set(el, saved);
-      } else if (cs.position !== "absolute") {
+      } else {
+        // In flow (or absolute) but sized to the viewport (100vw) instead of the page.
         const rect = el.getBoundingClientRect();
         if (Math.abs(rect.width - vw) <= 4 && rect.right > edge + 2) {
           const saved: Saved = {};
@@ -143,6 +154,7 @@ function main() {
         if (!root) break;
         if (!root.isConnected || (panelHost && panelHost.contains(root))) continue;
         if (root instanceof HTMLElement) consider(root);
+        else if (root instanceof ShadowRoot && !root.host.isConnected) continue;
         walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
       }
       const node = walker.nextNode();
@@ -157,6 +169,7 @@ function main() {
     if (walker || queue.length || touched.size) sliceTimer = setTimeout(runSlice, 16);
   };
   let observer: MutationObserver | null = null;
+  const OBSERVE: MutationObserverInit = { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style"] };
   let checkInterval: any = null;
   const onResize = () => {
     clearTimeout(resizeTimer);
@@ -175,7 +188,7 @@ function main() {
         }
       }
     });
-    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style"] });
+    observer.observe(document.documentElement, OBSERVE);
     window.addEventListener("resize", onResize);
     // Cheap check of adjusted layers: re-adjust the ones the page re-rendered.
     checkInterval = setInterval(() => {
@@ -205,6 +218,7 @@ function main() {
     rescanTimers = [];
     observer?.disconnect();
     observer = null;
+    shadows = new WeakSet();
     clearInterval(checkInterval);
     clearTimeout(sliceTimer);
     clearTimeout(resizeTimer);
@@ -240,6 +254,8 @@ function main() {
 
   const showPanel = (width?: number, focus = false) => {
     if (width) panelWidth = Math.max(320, Math.min(900, width));
+    // Always leave some of the page visible in narrow windows.
+    panelWidth = Math.max(320, Math.min(panelWidth, window.innerWidth - 280));
     wanted = true;
     if (panelHost) {
       // Already there: never rebuild (that would reload the panel and lose focus).
@@ -267,12 +283,14 @@ function main() {
         animation:in .32s cubic-bezier(.2,.8,.2,1)}
       @media (prefers-color-scheme: dark){.wrap{background:rgba(40,40,40,.86)}.shadow{box-shadow:0 0 0 .5px rgba(255,255,255,.12),0 14px 44px rgba(0,0,0,.5)}}
       @keyframes in{from{opacity:0;transform:translateX(28px) scale(.985)}to{opacity:1;transform:none}}
-      .handle{position:absolute;left:0;top:28px;bottom:28px;width:7px;cursor:col-resize;z-index:2;touch-action:none}
-      .handle::after{content:"";position:absolute;left:2px;top:50%;width:3px;height:36px;margin-top:-18px;border-radius:3px;background:rgba(127,127,127,.0);transition:background .15s}
+      /* The grip straddles the card's left edge (outside the clipped card), so it is easy to hit. */
+      .handle{position:absolute;left:-7px;top:22px;bottom:22px;width:14px;cursor:col-resize;z-index:4;touch-action:none}
+      .handle::after{content:"";position:absolute;left:5px;top:50%;width:4px;height:40px;margin-top:-20px;border-radius:4px;background:rgba(127,127,127,.0);transition:background .15s}
       .handle:hover::after,.handle.drag::after{background:rgba(127,127,127,.55)}
       iframe{border:0;width:100%;height:100%;display:block;color-scheme:light dark;background:transparent;border-radius:28px;opacity:0;transition:opacity .18s}
       iframe.ready{opacity:1}
-      .shield{position:fixed;inset:0;cursor:col-resize;display:none;z-index:3}
+      /* Covers the panel's frame while dragging, so the pointer never disappears into it. */
+      .shield{position:absolute;inset:0;cursor:col-resize;display:none;z-index:3}
     `;
     const wrap = document.createElement("div");
     wrap.className = "wrap";
@@ -309,8 +327,8 @@ function main() {
     window.addEventListener("message", onReady);
     const shadowLayer = document.createElement("div");
     shadowLayer.className = "shadow";
-    wrap.append(handle, panelFrame);
-    root.append(style, shadowLayer, wrap, shield);
+    wrap.append(panelFrame);
+    root.append(style, shadowLayer, wrap, shield, handle);
     setTimeout(() => {
       if (panelFrame !== frame || w.__safariAgentFrameLoaded) return;
       window.removeEventListener("message", onReady);
@@ -319,39 +337,59 @@ function main() {
       showReloadCard();
     }, 5000);
 
-    // ---- resizing: the card follows the pointer every frame; the page catches up ~10×/s ----
-    let startX = 0, startW = 0, pendingW = 0, raf = 0, lastPush = 0;
+    // ---- resizing: the card and the page follow the pointer every frame ----
+    // The handle captures the pointer, so the drag keeps going wherever the pointer goes
+    // (over the page, the panel's frame or outside the window) until the button is released.
+    let startX = 0, startW = 0, pendingW = 0, raf = 0, dragging = -1, lastScan = 0;
     const applyDrag = () => {
       raf = 0;
+      if (!panelHost || pendingW === panelWidth) return;
+      const wider = pendingW > panelWidth;
       panelWidth = pendingW;
-      panelHost!.style.width = panelWidth + "px";
+      panelHost.style.width = panelWidth + "px";
+      writePush(); // one style write: the page and adjusted layers follow in the same frame
+      // Fixed layers that the wider sidebar now reaches.
       const now = performance.now();
-      if (now - lastPush > 100) { lastPush = now; writePush(); }
+      if (wider && now - lastScan > 200) { lastScan = now; fullScan(); }
     };
-    handle.addEventListener("pointerdown", (e: PointerEvent) => {
-      startX = e.clientX;
-      startW = panelWidth;
-      animate = false;
-      handle.classList.add("drag");
-      shield.style.display = "block";
-      e.preventDefault();
-    });
-    shield.addEventListener("pointermove", (e: PointerEvent) => {
-      pendingW = Math.max(320, Math.min(900, startW + (startX - e.clientX)));
-      if (!raf) raf = requestAnimationFrame(applyDrag);
-    });
-    const end = () => {
-      if (shield.style.display !== "block") return;
+    const end = (e?: PointerEvent) => {
+      if (dragging < 0 || (e && e.pointerId !== dragging)) return;
+      try { handle.releasePointerCapture(dragging); } catch { /* already released */ }
+      dragging = -1;
       shield.style.display = "none";
       handle.classList.remove("drag");
-      if (raf) { cancelAnimationFrame(raf); applyDrag(); }
-      writePush();
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      applyDrag();
       animate = true;
+      writePush();
       browser.runtime.sendMessage({ kind: "panel_width", width: panelWidth }).catch(() => {});
       fullScan(); // layers between the old and the new edge
     };
-    shield.addEventListener("pointerup", end);
-    shield.addEventListener("pointerleave", end);
+    handle.addEventListener("pointerdown", (e: PointerEvent) => {
+      if (e.button !== 0) return;
+      if (dragging >= 0) end();
+      dragging = e.pointerId;
+      try { handle.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+      startX = e.clientX;
+      startW = pendingW = panelWidth;
+      animate = false;
+      writePush(); // without the margin transition, so the page doesn't lag behind
+      handle.classList.add("drag");
+      shield.style.display = "block";
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    handle.addEventListener("pointermove", (e: PointerEvent) => {
+      if (e.pointerId !== dragging) return;
+      if (!(e.buttons & 1)) return end(); // released somewhere we didn't hear about
+      const max = Math.max(320, Math.min(900, window.innerWidth - 280));
+      pendingW = Math.round(Math.max(320, Math.min(max, startW + (startX - e.clientX))));
+      if (!raf) raf = requestAnimationFrame(applyDrag);
+    });
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
+    handle.addEventListener("lostpointercapture", end);
+    window.addEventListener("blur", () => end());
     document.documentElement.appendChild(panelHost);
     guardHost();
     writePush();

@@ -354,46 +354,60 @@ struct PearlsDesign: View {
         let d: CGFloat = 66, step: CGFloat = 88
         let width = CGFloat(max(n - 1, 0)) * step + d
         let center = clamp(model.anchor, half: CGSize(width: width / 2 + 10, height: 80), in: size)
-        TimelineView(.animation(minimumInterval: 1 / 60)) { tl in
-            let t = tl.date.timeIntervalSinceReferenceDate
-            ZStack {
-                if let c = model.caption { CaptionPill(text: c).offset(y: -78).opacity(model.visible ? 1 : 0) }
-                ForEach(model.items) { item in
-                    let x = (CGFloat(item.index) - CGFloat(n - 1) / 2) * step
-                    let arc = pow(x / max(width / 2, 1), 2) * 14
-                    let bob = sin(t * 1.5 + Double(item.index) * 1.3) * 3.5
-                    let lit = hovered == item.id || model.highlighted == item.index
-                    VStack(spacing: 7) {
-                        ZStack {
-                            ProfileGlyph(item: item, size: d)
-                            // Specular highlight that makes the glass read as a sphere.
-                            Ellipse().fill(LinearGradient(colors: [.white.opacity(0.32), .white.opacity(0)], startPoint: .top, endPoint: .bottom))
-                                .frame(width: d * 0.5, height: d * 0.24)
-                                .offset(x: -d * 0.08, y: -d * 0.2)
-                                .blendMode(.plusLighter)
-                                .allowsHitTesting(false)
-                        }
-                        .clipShape(Circle())
-                        .liquidGlass(Circle(), tint: item.color.opacity(lit ? 0.4 : 0.2), interactive: true)
-                        .shadow(color: item.color.opacity(lit ? 0.45 : 0.2), radius: lit ? 16 : 9, y: 6)
-                        .scaleEffect(lit ? 1.14 : 1)
-                        if model.showNames {
-                            Text(item.name).font(.system(size: 12, weight: .semibold)).lineLimit(1).fixedSize()
-                                .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
-                        }
-                    }
-                    .frame(width: d + 20)
+        ZStack {
+            if let c = model.caption { CaptionPill(text: c).offset(y: -78).opacity(model.visible ? 1 : 0) }
+            ForEach(model.items) { item in
+                let x = (CGFloat(item.index) - CGFloat(n - 1) / 2) * step
+                let arc = pow(x / max(width / 2, 1), 2) * 14
+                let lit = hovered == item.id || model.highlighted == item.index
+                PearlView(item: item, d: d, lit: lit, showNames: model.showNames)
                     .contentShape(Circle().inset(by: -8))
-                    .onHover { h in withAnimation(.spring(response: 0.28, dampingFraction: 0.65)) { hovered = h ? item.id : (hovered == item.id ? nil : hovered) } }
+                    .onHover { h in withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { hovered = h ? item.id : (hovered == item.id ? nil : hovered) } }
                     .onTapGesture { model.onPick(item.id) }
-                    .offset(x: x, y: arc + (model.visible ? bob : 30))
+                    .offset(x: x, y: arc + (model.visible ? 0 : 30))
                     .scaleEffect(model.visible ? 1 : 0.1)
                     .opacity(model.visible ? 1 : 0)
                     .animation(stagger(item.index, 0.05), value: model.visible)
-                }
             }
         }
         .position(center)
+    }
+}
+
+/// One pearl. Its gentle bob is a single repeating animation that Core Animation runs on
+/// its own (no per-frame redraw of the glass), kept apart from the hover and appear
+/// animations so neither of them can make it jump.
+private struct PearlView: View {
+    let item: PickerItem
+    let d: CGFloat
+    let lit: Bool
+    let showNames: Bool
+    @State private var up = false
+
+    var body: some View {
+        VStack(spacing: 7) {
+            ZStack {
+                ProfileGlyph(item: item, size: d)
+                // Specular highlight that makes the glass read as a sphere.
+                Ellipse().fill(LinearGradient(colors: [.white.opacity(0.32), .white.opacity(0)], startPoint: .top, endPoint: .bottom))
+                    .frame(width: d * 0.5, height: d * 0.24)
+                    .offset(x: -d * 0.08, y: -d * 0.2)
+                    .blendMode(.plusLighter)
+                    .allowsHitTesting(false)
+            }
+            .clipShape(Circle())
+            .liquidGlass(Circle(), tint: item.color.opacity(lit ? 0.4 : 0.2))
+            .shadow(color: item.color.opacity(lit ? 0.45 : 0.2), radius: lit ? 16 : 9, y: 6)
+            .scaleEffect(lit ? 1.12 : 1)
+            if showNames {
+                Text(item.name).font(.system(size: 12, weight: .semibold)).lineLimit(1).fixedSize()
+                    .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
+            }
+        }
+        .frame(width: d + 20)
+        .offset(y: up ? -3.5 : 3.5)
+        .animation(.easeInOut(duration: 2.1).repeatForever(autoreverses: true).delay(Double(item.index) * 0.35), value: up)
+        .onAppear { up = true }
     }
 }
 

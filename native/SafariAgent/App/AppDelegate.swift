@@ -66,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if !CommandLine.arguments.contains("--background") { other.activate() }
             exit(0)
         }
+        watchActivation()
         Hub.shared.onStatusChange = { [weak self] in self?.model.refresh() }
         Hub.shared.start()
         ProfileRegistry.shared.start()
@@ -97,11 +98,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private var launchedForURL = false
+    /// The app that was in front before Orbit (to hand focus back after a link).
+    private var previousApp: NSRunningApplication?
+    private var becameActiveAt = Date.distantPast
+
+    private func watchActivation() {
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] n in
+            guard let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            if app.processIdentifier == ProcessInfo.processInfo.processIdentifier { self?.becameActiveAt = Date() } else { self?.previousApp = app }
+        }
+    }
 
     func application(_ application: NSApplication, open urls: [URL]) {
         launchedForURL = true
-        for url in urls {
-            if url.isFileURL { SafariController.openPlain(url) } else { Router.shared.handleExternal(url) }
+        let handle = {
+            for url in urls {
+                if url.isFileURL { SafariController.openPlain(url) } else { Router.shared.handleExternal(url) }
+            }
+        }
+        // macOS activates Orbit (the default browser) to open a link, which brings the
+        // settings window forward too. Give the focus back to the app the link came from
+        // first; the picker doesn't need Orbit to be active.
+        if NSApp.isActive, Date().timeIntervalSince(becameActiveAt) < 1.5, settingsWindow?.isVisible == true,
+           let prev = previousApp, !prev.isTerminated {
+            prev.activate()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: handle)
+        } else {
+            handle()
         }
     }
 

@@ -459,6 +459,9 @@ enum SafariAX {
         }
     }
 
+    static func isMinimized(_ w: AXUIElement) -> Bool { (attr(w, kAXMinimizedAttribute) as? Bool) == true }
+    static func unminimize(_ w: AXUIElement) { AXUIElementSetAttributeValue(w, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
+
     /// Bring a window to the front and make Safari the active app.
     static func raise(_ w: AXUIElement) {
         AXUIElementSetAttributeValue(w, kAXMainAttribute as CFString, kCFBooleanTrue)
@@ -806,43 +809,74 @@ enum SafariController {
     /// a new window opens here instead (macOS doesn't let apps move windows between Spaces).
     static func focus(profileId: String, screen: NSScreen? = nil) async -> Outcome {
         if AXIsProcessTrusted(), !(await ensureSafariRunning()) { return .fallback(.safariDidntStart()) }
-        // Safari's window list is ordered front to back: the first window of the profile is
-        // its most recently used one. This works even while the profile's extension sleeps.
+        let name = safariName(profileId)
+        // 1. Safari's window list is ordered front to back: the first window of the profile
+        //    is its most recently used one. Windows are recognized by their profile button,
+        //    which works even while the profile's extension sleeps.
         let viaAX = await MainActor.run { () -> Bool in
-            guard AXIsProcessTrusted(), let name = safariName(profileId) else { return false }
+            guard AXIsProcessTrusted(), let name else { return false }
             let mine = SafariAX.windowProfiles().filter { $0.name == name }
             let here = SafariAX.onScreenFrames()
-            let onThisSpace = mine.first { w in
-                guard let f = SafariAX.frame(of: w.element) else { return false }
-                return here.contains { abs($0.minX - f.minX) < 3 && abs($0.minY - f.minY) < 3 && abs($0.width - f.width) < 3 }
-            }
-            if let w = onThisSpace ?? (screen == nil ? mine.first : nil) {
-                if let screen { moveIfNeeded(w.element, to: screen) }
-                SafariAX.raise(w.element)
-                activateSafari()
-                return true
-            }
-            openingUntil = Date().addingTimeInterval(2)
-            if SafariAX.pressNewWindow(profileName: name) {
-                activateSafari()
-                if let screen {
-                    // Move the new window to the picker's display once it exists.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        if let w = SafariAX.windowProfiles().first(where: { $0.name == name }) { moveIfNeeded(w.element, to: screen) }
-                    }
-                }
-                return true
-            }
-            return false
+            let visible = mine.first { w in SafariAX.frame(of: w.element).map { f in here.contains { sameFrame($0, f) } } ?? false }
+            // A minimized window comes back on this Space: use it instead of opening a new one.
+            let minimized = mine.first { SafariAX.isMinimized($0.element) }
+            guard let w = visible ?? (screen == nil ? mine.first : nil) ?? minimized else { return false }
+            if SafariAX.isMinimized(w.element) { SafariAX.unminimize(w.element) }
+            if let screen { moveIfNeeded(w.element, to: screen) }
+            SafariAX.raise(w.element)
+            activateSafari()
+            return true
         }
         if viaAX { return .done }
+        // 2. Ask the profile's extension: it knows its windows even when their profile
+        //    button can't be read (full screen, hidden or rearranged toolbar).
+        if Hub.shared.queue.sync(execute: { Hub.shared.instances[profileId] != nil }),
+           case .success(let v) = await Hub.shared.callInstance(profileId, "list_windows", [:], timeout: 2),
+           let wins = (v as? JSONObject)?["windows"] as? [JSONObject], !wins.isEmpty {
+            let here = await MainActor.run { SafariAX.onScreenFrames() }
+            let rect = { (w: JSONObject) -> CGRect? in
+                guard let l = w["left"] as? Double, let t = w["top"] as? Double, let wd = w["width"] as? Double, let h = w["height"] as? Double else { return nil }
+                return CGRect(x: l, y: t, width: wd, height: h)
+            }
+            let visible = wins.filter { w in (w["state"] as? String) != "minimized" && rect(w).map { f in here.contains { sameFrame($0, f) } } == true }
+            let ordered = visible.sorted { ($0["recent"] as? Bool == true ? 0 : 1) < ($1["recent"] as? Bool == true ? 0 : 1) }
+            let pick = ordered.first
+                ?? (screen == nil ? (wins.first { $0["recent"] as? Bool == true } ?? wins.first) : nil)
+                ?? wins.first { ($0["state"] as? String) == "minimized" }
+            if let id = pick?["id"], case .success = await Hub.shared.callInstance(profileId, "focus_window", ["windowId": id], timeout: 3) {
+                await MainActor.run { activateSafari() }
+                return .done
+            }
+        }
+        // 3. No window of the profile here: open a new one (macOS doesn't let apps move
+        //    windows between Spaces).
+        let opened = await MainActor.run { () -> Bool in
+            guard AXIsProcessTrusted(), let name else { return false }
+            openingUntil = Date().addingTimeInterval(2)
+            guard SafariAX.pressNewWindow(profileName: name) else { return false }
+            activateSafari()
+            if let screen {
+                // Move the new window to the picker's display once it exists.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    if let w = SafariAX.windowProfiles().first(where: { $0.name == name }) { moveIfNeeded(w.element, to: screen) }
+                }
+            }
+            return true
+        }
+        if opened { return .done }
         if case .success = await Hub.shared.callInstance(profileId, "focus_profile", [:], timeout: 5) {
             await MainActor.run { activateSafari() }
             return .done
         }
         let trusted = await MainActor.run { AXIsProcessTrusted() }
         if !trusted { return .fallback(.accessibility("Needed to switch Safari windows")) }
-        return .fallback(.unknownProfile(safariName(profileId) ?? "this profile"))
+        return .fallback(.unknownProfile(name ?? "this profile"))
+    }
+
+    /// The same window, as reported by Accessibility, the window server or the extension
+    /// (all in top-left points; small differences from rounding).
+    static func sameFrame(_ a: CGRect, _ b: CGRect) -> Bool {
+        abs(a.minX - b.minX) < 4 && abs(a.minY - b.minY) < 4 && abs(a.width - b.width) < 4
     }
 
     /// Move a window onto `screen` (keeping its size) unless it is already mostly there.

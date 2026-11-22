@@ -300,6 +300,23 @@ async function handleCall(msg: any): Promise<any> {
       if (tab) routing.exemptNext(tab.id);
       return { ok: true, windowId: w?.id };
     }
+    case "list_windows": {
+      // Bounds are in screen points, like the window list macOS reports.
+      const wins = await browser.windows.getAll({ windowTypes: ["normal"] }).catch(() => []);
+      return {
+        windows: (wins || []).filter((w: any) => !w.incognito).map((w: any) => ({
+          id: w.id, left: w.left, top: w.top, width: w.width, height: w.height, state: w.state, focused: !!w.focused,
+          recent: w.id === lastFocusedWindowId,
+        })),
+      };
+    }
+    case "focus_window": {
+      const id = Number(p.windowId);
+      const win = await browser.windows.get(id).catch(() => null);
+      if (!win) throw new Error("no such window");
+      await browser.windows.update(id, win.state === "minimized" ? { state: "normal", focused: true } : { focused: true });
+      return { ok: true };
+    }
     case "focus_profile": {
       const win = await mruWindow();
       if (win) await browser.windows.update(win.id, { focused: true });
