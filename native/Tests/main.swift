@@ -325,6 +325,22 @@ do {
 }
 
 do {
+    // Comparing two profiles' copies of a login (missed change reports).
+    typealias C = SessionSharing.CookieState
+    let now = 1_800_000_000.0, day = 86400.0
+    let base = [C(key: "SID|.g.com|/", digest: 1, expires: now + 300 * day), C(key: "TS|.g.com|/", digest: 2, expires: now + 200 * day),
+                C(key: "__cf_bm|.g.com|/", digest: 3, expires: now + 1800), C(key: "csrf|g.com|/", digest: 4, expires: nil)]
+    var other = base
+    other[2].digest = 99; other[3].digest = 98
+    check(SessionSharing.compare(ref: base, other: other, now: now) == .same, "bot-check and session cookies don't count as a different login")
+    other[1] = C(key: "TS|.g.com|/", digest: 7, expires: now + 365 * day)
+    check(SessionSharing.compare(ref: base, other: other, now: now) == .otherNewer, "a copy rotated later is newer")
+    check(SessionSharing.compare(ref: other, other: base, now: now) == .refNewer, "the older copy never wins")
+    check(SessionSharing.compare(ref: other, other: Array(other.dropFirst()), now: now) == .refNewer, "a copy missing the session cookie is never newer")
+    check(SessionSharing.compare(ref: base, other: base + [C(key: "X|.g.com|/", digest: 5, expires: now + 99 * day)], now: now) == .same, "extra cookies in the other copy alone don't trigger copying")
+}
+
+do {
     // Shared logins: the profile whose copy changed last is the one exported from.
     var st = AppSettings()
     st.profiles = ["A", "B", "C"].enumerated().map { ProfileConfig(id: $0.element, name: $0.element, symbol: "star", color: "#000000", order: $0.offset, detectedName: $0.element) }

@@ -31,6 +31,8 @@ export interface RoutingDeps {
 }
 
 const BLANK = /^(about:|favorites:|safari-|bookmarks:|$)/;
+const strip = (u: string) => String(u).split("#")[0];
+const host = (u: string) => { try { return new URL(u).host; } catch { return ""; } };
 
 export class RoutingEngine {
   /** Tabs whose next navigation must not be routed (opened by routing, "open here", the agent). */
@@ -55,12 +57,19 @@ export class RoutingEngine {
       this.tabPages.set(d.tabId, d.url);
       this.commits.set(d.tabId, [d.url, Date.now()]);
     });
+    browser.webNavigation?.onCommitted?.addListener((d: any) => {
+      if (d.frameId === 0) this.onShown(d.tabId, d.url, "commit");
+    });
+    browser.tabs.onUpdated.addListener((tabId: number, info: any) => {
+      if (info?.url) this.onShown(tabId, info.url, "url");
+    });
     browser.tabs.onCreated.addListener((t: any) => this.created.set(t.id, Date.now()));
     browser.tabs.onRemoved.addListener((id: number) => {
       this.tabPages.delete(id);
       this.commits.delete(id);
       this.exempt.delete(id);
       this.created.delete(id);
+      this.preloads.delete(id);
     });
     // Seed what tabs currently show. The background often wakes up *because* of a
     // navigation, so the handler waits for this before judging a tab.
@@ -131,8 +140,22 @@ export class RoutingEngine {
     return false;
   }
 
+  /** Navigations that never showed up in their tab: Safari loading the address bar's top
+   *  hit in the background while the user is still typing. Routed only if the tab then
+   *  really shows the page (the user pressed Return). */
+  private preloads = new Map<number, { url: string; at: number; empty: boolean }>();
+  /** Recent navigation decisions (host only, in memory) for diagnosis. */
+  navLog: any[] = [];
+  private note(e: any) {
+    this.navLog.push({ t: Date.now(), ...e });
+    if (this.navLog.length > 60) this.navLog.splice(0, this.navLog.length - 60);
+  }
+
   private async onBeforeNavigate(d: any) {
     if (d.frameId !== 0 || !/^https?:/i.test(d.url)) return;
+    // Prerendered / background documents (where the browser says so) are not navigations.
+    if (typeof d.tabId !== "number" || d.tabId < 0) return;
+    if (d.documentLifecycle && d.documentLifecycle !== "active") return;
     const until = this.exempt.get(d.tabId);
     if (until !== undefined) {
       this.exempt.delete(d.tabId);
@@ -147,19 +170,30 @@ export class RoutingEngine {
     // Woken up by this navigation? Wait for the rules (a few ms) instead of missing it.
     if (!this.cfg()) await this.deps.ready();
     const target = this.target(d.url);
-    if (!target || this.dedupe(d.tabId, d.url)) return;
+    if (!target) return;
     const c = this.cfg()!;
     await this.seeded;
     const prev = this.tabPages.get(d.tabId);
     // The tab reloads the page it already shows (a reload, or Safari restoring the tab at
     // launch): the page is meant to be here — the user kept it, or chose "Open Here".
-    if (prev !== undefined && prev.split("#")[0] === d.url.split("#")[0]) return;
+    if (prev !== undefined && strip(prev) === strip(d.url)) return;
     const known = prev !== undefined;
     const fresh = (this.created.get(d.tabId) ?? 0) > Date.now() - 15000 && prev === undefined;
     const empty = fresh || (known && BLANK.test(prev!));
     if (!empty && known && c.routing.typedNavigation === "off") return;
+    // Is the tab really going there? While the user types in the address bar, Safari
+    // preloads the top hit — that fires this event, but the tab keeps showing its page.
+    const shown = await this.goesThere(d.tabId, d.url, started);
+    this.note({ ev: "before", tab: d.tabId, host: host(d.url), shown, empty, ms: Date.now() - started, keys: Object.keys(d).join(",") });
+    if (shown === "gone") return;
+    if (shown === "no") {
+      this.preloads.set(d.tabId, { url: strip(d.url), at: Date.now(), empty });
+      return;
+    }
+    if (this.dedupe(d.tabId, d.url)) return;
+    this.preloads.delete(d.tabId);
     let stopped = false;
-    if (!empty) {
+    if (!empty && !this.committedSince(d.tabId, d.url, started)) {
       // Cancel the navigation from inside the page before it unloads.
       try {
         const r = await browser.scripting.executeScript({ target: { tabId: d.tabId }, func: () => { window.stop(); return true; } });
@@ -168,6 +202,36 @@ export class RoutingEngine {
       if (stopped) this.stats.stopped++;
     }
     await this.route(d.tabId, d.url, target, { kind: "navigation", empty, stopped, started, uncertain: !known && !empty });
+  }
+
+  /** Whether a navigation that just started is the tab's own ("yes"), a background
+   *  preload that the tab doesn't show ("no"), or in a tab that doesn't exist ("gone"). */
+  private async goesThere(tabId: number, url: string, since: number): Promise<"yes" | "no" | "gone"> {
+    const want = strip(url);
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    for (let i = 0; i < 30; i++) {
+      const t = await browser.tabs.get(tabId).catch(() => null);
+      if (!t) return "gone";
+      if (t.url && strip(String(t.url)) === want) return "yes";
+      if (t.pendingUrl && strip(String(t.pendingUrl)) === want) return "yes";
+      if (this.committedSince(tabId, url, since)) return "yes";
+      await sleep(i < 10 ? 15 : 100);
+    }
+    return "no";
+  }
+
+  /** The tab now shows a page: if it is one Safari had preloaded and a rule sends it
+   *  elsewhere, the user did open it (pressed Return on the suggestion) — route it now. */
+  private onShown(tabId: number, url: string, via: string) {
+    const p = this.preloads.get(tabId);
+    if (!p || !/^https?:/i.test(url)) return;
+    if (Date.now() - p.at > 120000) { this.preloads.delete(tabId); return; }
+    if (strip(url) !== p.url) return;
+    this.preloads.delete(tabId);
+    const target = this.target(url);
+    this.note({ ev: "shown", via, tab: tabId, host: host(url), routed: !!target });
+    if (!target || this.deps.isAgentTab(tabId) || this.dedupe(tabId, url)) return;
+    this.route(tabId, url, target, { kind: "navigation", empty: p.empty, stopped: false, started: Date.now() }).catch(() => {});
   }
 
   /** A link click held back by the content script (the page is untouched). */
@@ -253,6 +317,6 @@ export class RoutingEngine {
   }
 
   status() {
-    return { ...this.stats, active: !!this.cfg()?.routing.active, rules: this.cfg()?.routing.rules.length || 0 };
+    return { ...this.stats, active: !!this.cfg()?.routing.active, rules: this.cfg()?.routing.rules.length || 0, log: this.navLog.slice(-25) };
   }
 }

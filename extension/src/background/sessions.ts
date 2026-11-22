@@ -79,6 +79,32 @@ export class SessionSync {
     return { stores: out, chosen };
   }
 
+  /** Names, expiry and a short one-way digest of each value of a site's cookies, so Orbit
+   *  can tell whether two profiles hold the same login, and which copy is newer, without
+   *  the values leaving the profile. */
+  async state(domains: string[]) {
+    if (!this.available) throw new Error("Safari doesn't offer cookie access to extensions here.");
+    const storeId = await this.storeId();
+    const seen = new Set<string>();
+    const out: any[] = [];
+    for (const domain of domains) {
+      const list = await browser.cookies.getAll({ domain, ...(storeId ? { storeId } : {}) }).catch(() => []);
+      for (const c of list || []) {
+        if (c.partitionKey || !domains.some((d) => matches(c.domain, d))) continue;
+        const k = `${c.name}|${c.domain}|${c.path}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        const h = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(c.value))));
+        out.push({ k, d: ((h[0] << 16) | (h[1] << 8) | h[2]), exp: c.session || !c.expirationDate ? null : Math.round(c.expirationDate) });
+      }
+    }
+    return { cookies: out };
+  }
+
+  async digest(domain: string) {
+    return this.state([domain]);
+  }
+
   start() {
     browser.cookies?.onChanged?.addListener((info: any) => {
       if (Date.now() < this.mutedUntil) return;

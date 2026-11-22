@@ -338,6 +338,12 @@ async function handleCall(msg: any): Promise<any> {
     }
     case "cookies_diagnose":
       return sessions.diagnose(String(p.domain || "chatgpt.com"));
+    case "cookies_state":
+      return sessions.state((p.domains || []).map(String));
+    case "cookies_digest":
+      // Diagnosis without values: names, flags and a 16-bit digest of each value, so two
+      // profiles' copies can be compared (the digest can't be turned back into a value).
+      return sessions.digest(String(p.domain || "google.com"));
     case "cookies_export":
       return sessions.exportCookies((p.domains || []).map(String));
     case "cookies_import":

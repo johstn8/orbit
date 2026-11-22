@@ -91,22 +91,108 @@ final class SessionSharing {
     }
 
     /// A profile connected: bring its shared logins up to date (or pass its newer copy on).
-    func instanceConnected(_ profile: String) {
+    func instanceConnected(_ profile: String) { look(profile, delay: 2) }
+
+    /// You're using a window of this profile: Safari now tells its cookie store, so check that
+    /// it has the newest copy of each login it shares.
+    func profileActive(_ profile: String) { look(profile, delay: 1.5) }
+
+    private func look(_ profile: String, delay: Double) {
         let s = SettingsStore.shared.current
         for site in s.sharing where site.enabled && members(site, settings: s).contains(profile) {
-            if newest(site, settings: s) == profile || !(current[site.id]?.contains(profile) ?? false) { schedule(site.id, delay: 2) }
+            if profile != site.sourceProfileId && site.syncedTargets[profile] == nil {
+                schedule(site.id, delay: delay) // first time: give it the login
+            } else {
+                let id = site.id
+                hub.queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.compareCopies(id, around: profile) }
+            }
         }
     }
 
-    /// You're using a window of this profile: Safari now tells its cookie store, so bring
-    /// logins it receives up to date — only when it doesn't have the newest copy yet
-    /// (or the last try failed). Writing the same login again would be at best useless.
-    func profileActive(_ profile: String) {
+    /// Per site and profile: when the copies were last compared.
+    private var compared: [String: Date] = [:]
+
+    /// Change reports can be missed (Safari suspends a profile's extension, and the site may
+    /// replace its cookies just then). So whenever a profile is in use, compare its copy with
+    /// the newest holder's — the actual cookies, not what Orbit believes — and pass on
+    /// whichever is newer. An older copy is never written over a newer one.
+    func compareCopies(_ siteId: String, around profile: String) {
         let s = SettingsStore.shared.current
-        for site in s.sharing where site.enabled && members(site, settings: s).contains(profile) {
-            let ok = (site.lastResult ?? "").hasPrefix("Shared with") && !(site.lastResult ?? "").contains("will update")
-            if !ok || !(current[site.id]?.contains(profile) ?? false) { schedule(site.id, delay: 1.5) }
+        guard let site = s.sharing.first(where: { $0.id == siteId }), site.enabled else { return }
+        let ref = newest(site, settings: s)
+        let others = (profile == ref ? members(site, settings: s).filter { $0 != ref } : [profile])
+            .filter { hub.instances[$0] != nil && ($0 == site.sourceProfileId || site.syncedTargets[$0] != nil) }
+        guard hub.instances[ref] != nil, !others.isEmpty else { return }
+        let key = "\(siteId)|\(profile)"
+        if let t = compared[key], Date().timeIntervalSince(t) < 45 { return }
+        compared[key] = Date()
+        let doms = domains(site)
+        let excluded = Set(site.excludedCookies.map { $0.lowercased() })
+        let gen = generation[site.id, default: 0]
+        var states: [String: [CookieState]] = [:]
+        let group = DispatchGroup()
+        for p in [ref] + others {
+            group.enter()
+            hub.callInstance(p, "cookies_state", ["domains": doms], timeout: 10) { r in
+                if case .success(let v) = r, let list = (v as? JSONObject)?["cookies"] as? [JSONObject] {
+                    states[p] = list.compactMap(CookieState.init).filter { !excluded.contains($0.name.lowercased()) }
+                }
+                group.leave()
+            }
         }
+        group.notify(queue: hub.queue) { [weak self] in
+            guard let self, let mine = states[ref], self.generation[site.id, default: 0] == gen else { return }
+            var stale = false
+            for o in others {
+                guard let theirs = states[o] else { continue }
+                switch Self.compare(ref: mine, other: theirs, now: Date().timeIntervalSince1970) {
+                case .same:
+                    self.current[site.id, default: []].formUnion([ref, o])
+                case .otherNewer:
+                    // Its copy changed after the one Orbit knew of: that one is passed on now.
+                    self.cookiesChanged(profile: o, domain: site.domain)
+                    return
+                case .refNewer:
+                    self.current[site.id]?.remove(o)
+                    stale = true
+                }
+            }
+            if stale { self.schedule(site.id, delay: 0.5) }
+        }
+    }
+
+    struct CookieState {
+        var key: String, digest: Int, expires: Double?
+        var name: String { String(key.split(separator: "|", maxSplits: 1).first ?? "") }
+        init(key: String, digest: Int, expires: Double?) { self.key = key; self.digest = digest; self.expires = expires }
+        init?(_ o: JSONObject) {
+            guard let k = o["k"] as? String, let d = o["d"] as? Int else { return nil }
+            self.init(key: k, digest: d, expires: (o["exp"] as? NSNumber)?.doubleValue)
+        }
+    }
+    enum Verdict { case same, refNewer, otherNewer }
+
+    /// Which of two copies of a login is newer. Only lasting cookies count (per-profile bot
+    /// checks and short-lived tracking cookies differ everywhere and say nothing about the
+    /// login). A copy is newer when it has every lasting cookie of the other and the cookies
+    /// they disagree on were set later (a later expiry date: sites set it from "now").
+    static func compare(ref: [CookieState], other: [CookieState], now: Double) -> Verdict {
+        func lasting(_ c: CookieState) -> Bool {
+            guard let e = c.expires, e - now > 2 * 86400 else { return false }
+            let n = c.name.lowercased()
+            return !["__cf", "cf_", "_cfuvid", "_ga", "_gid", "_gcl", "_fbp"].contains { n.hasPrefix($0) }
+        }
+        let a = Dictionary(ref.filter(lasting).map { ($0.key, $0) }, uniquingKeysWith: { x, _ in x })
+        let b = Dictionary(other.filter(lasting).map { ($0.key, $0) }, uniquingKeysWith: { x, _ in x })
+        let differing = a.keys.filter { b[$0] != nil && b[$0]!.digest != a[$0]!.digest }
+        let onlyRef = a.keys.filter { b[$0] == nil }
+        if differing.isEmpty && onlyRef.isEmpty { return .same }
+        if onlyRef.isEmpty {
+            let ra = differing.compactMap { a[$0]?.expires }.max() ?? 0
+            let rb = differing.compactMap { b[$0]?.expires }.max() ?? 0
+            if rb > ra { return .otherNewer }
+        }
+        return .refNewer
     }
 
     private func schedule(_ siteId: String, delay: Double) {

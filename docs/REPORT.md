@@ -147,6 +147,28 @@ The prompt-free real-Safari checks verify:
 - **Cause:** Orbit makes room for fixed layers (app shells, headers) when it scans the page and when the page changes its elements. While a tab is hidden, Safari runs no animation frames, so apps such as chatgpt.com finish their layout only after the tab is shown again, often without changing any attribute. Layers measured while hidden (often 0 wide) were never measured again and stayed under the sidebar.
 - **Fix:** when a tab becomes visible again (and on `pageshow`, and on window focus at most every 3 s), Orbit re-applies the page margin and rescans now, after 0.4 s and after 1.5 s. It also watches `<head>`, so a site that rebuilds it can't drop the margin style.
 
+## 1.1.11: address-bar suggestions routed, missed login changes
+
+- **Typing a routed site's name routed it before Return.** Safari loads the address bar's
+  top hit in the background while you type; that fires `webNavigation.onBeforeNavigate`
+  although the tab keeps showing its page. Routing now first checks that the tab really goes
+  there (its URL changes or the page commits). A background preload is remembered and only
+  routed if the tab then shows it (you pressed Return). Prerendered documents and tabs
+  without an id are ignored. Decisions are kept in memory (host only) in `caps.routing.log`.
+- **Shared logins sometimes didn't arrive.** A change report is lost when Safari has the
+  profile's extension suspended at that moment (here: signing in to Google and ChatGPT in
+  Personal), and since 1.1.10 nothing re-checked. Now, whenever a profile is used or
+  connects, Orbit compares its copy with the newest holder's — the extension sends names,
+  expiry dates and a 24-bit one-way digest per cookie, never values — and passes on
+  whichever copy is newer (all lasting cookies present, later expiry on the ones that
+  differ). Bot-check, session and short-lived cookies are not compared. An older copy is
+  still never written over a newer one; the blind re-copy from the in-memory cache on
+  activation is gone.
+- Tests: 5 new Swift checks for the comparison (119/119), TypeScript 50/50. Verified live:
+  after install all three profiles hold identical Google cookies (56/56) and identical
+  ChatGPT login cookies (only per-profile Cloudflare cookies differ). The address-bar fix
+  is not yet verified by typing in Safari.
+
 ## 1.1.10: shared Google and ChatGPT logins signed out
 
 - **Cause:** shared logins were copied one way only, from the source to the targets, and again every 10 minutes while a target was in use, from an in-memory copy up to 12 hours old when the source's extension slept. Google and ChatGPT replace their session cookies every few minutes in whichever profile is in use, and treat an already replaced cookie that shows up again as a stolen session: they end it, in every profile. Copying an older login over a newer one did exactly that. Sites with long-lived cookies (GitHub, LinkedIn, Instagram) weren't affected.
