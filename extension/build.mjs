@@ -22,6 +22,7 @@ const common = {
 const entries = [
   { entryPoints: ["src/background/background.ts"], outfile: `${out}background.js` },
   { entryPoints: ["src/content/content.ts"], outfile: `${out}content.js` },
+  { entryPoints: ["src/content/mainworld.ts"], outfile: `${out}mainworld.js` },
   { entryPoints: ["src/panel/panel.tsx"], outfile: `${out}panel.js` },
 ];
 // Export the tool catalog for the native helper (fallback when the extension is not connected).

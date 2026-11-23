@@ -147,14 +147,8 @@ Key ideas:
   - A target only updates while its profile is running.
   - iCloud Keychain passwords and passkeys already work in all profiles, which is the most robust alternative.
 
-### Shared history (Settings › Shared History)
+### Chat history across profiles
 
-- **Pages from all profiles:** each profile's Orbit extension reports the pages you open (URL and title).
-  - Private windows are never recorded, and you can exclude profiles.
-  - Orbit stores them locally (`history.json`, 0600), for 3 months by default. "Clear Orbit History…" removes them.
-  - The AI agent can't read them.
-- **Search:** ⌃⌥H or the menu bar opens a glass search window over all profiles.
-  - **Return** opens the page in the profile you're using now; **⌘Return** opens it in the profile you saw it in.
 - **Orbit chats:** one chat history for all profiles, on by default (Settings › AI Agent).
   - Chats from other profiles are labeled with their profile.
   - The agent always works in the profile where you continue a chat.
@@ -267,7 +261,6 @@ The manifest grants `tabs`, `scripting`, `storage`, `nativeMessaging`, `activeTa
 | `Core/Profiles.swift` | `ProfileRegistry`, `SafariAX` and `SafariController`. Details below the table |
 | `Core/Routing.swift` | `RoutePattern` (matcher) and `Router` (route.open, loop guard, links from other apps) |
 | `Core/SafariDockWatcher.swift` | Safari's Dock icon with no window open: opens a profile window or shows the profiles in a row |
-| `Core/HistoryStore.swift`, `Picker/HistoryPanel.swift` | Shared history across profiles and its search window |
 | `Core/SessionSharing.swift` | Shared-login orchestration (source → targets) |
 | `Core/NativeTools.swift` | File and command tools, `PathPolicy`, `FolderPicker` |
 | `Core/Prompts.swift` | System prompt (browser, profiles, files, safety) and per-message context (profile, access levels) |
@@ -308,7 +301,6 @@ The manifest grants `tabs`, `scripting`, `storage`, `nativeMessaging`, `activeTa
 | What | Where |
 |---|---|
 | Settings (profiles, picker, rules, shared sites, computer access) | `~/Library/Application Support/SafariAgent/settings.json` (0600) |
-| Shared history (pages from all profiles) | `…/SafariAgent/history.json` (0600) |
 | Conversations (now with `profileId`, history per profile) | `…/SafariAgent/conversations/*.json` (0600) |
 | Helper connection | `…/SafariAgent/connection.json` (port + per-launch token, 0600) |
 | ChatGPT tokens | Login Keychain (`dev.local.SafariAgent.chatgpt`) |
@@ -353,7 +345,7 @@ The manifest grants `tabs`, `scripting`, `storage`, `nativeMessaging`, `activeTa
 | **Profile colors** | Not exposed through Accessibility. Stored in Safari's `SafariTabs.db` (needs Full Disk Access) | Optional read-only reader with a tolerant plist scan for colors and symbols. Without access, Orbit's colors are used |
 | **Open/focus in a profile** | Instances sleep ~30 s after use (connection log: connect … disconnect 30 s later, again at the next 1-minute alarm), so they are often unreachable. AX can raise windows and press menu items at any time | Focus through Safari's UI: the front-most window whose profile button matches, moved onto the picker's display and Space; else press "New … Window". Open URLs through the instance when it is awake, else raise the profile's window and `make new tab` via AppleScript |
 | **Keeping instances reachable** | Non-persistent background pages sleep; event listeners and alarms wake them | Listeners for windows/tabs/webNavigation/cookies, a 1-minute `alarms` keep-alive. Routing waits for the persisted config when a navigation woke the background, so it doesn't miss it |
-| **History / bookmarks / sessions** | `browser.history`, `bookmarks`, `topSites` and `sessions` are all undefined in Safari 27 (capability probe); Apple keeps history per profile by design | Orbit records visits itself through each instance (`tabs.onUpdated`, not in private windows) into a local shared history with its own search window. It never writes Safari's databases |
+| **History / bookmarks / sessions** | `browser.history`, `bookmarks`, `topSites` and `sessions` are all undefined in Safari 27 (capability probe); Apple keeps history per profile by design Not offered. Orbit's own page history (1.1.9–1.1.12) was removed in 1.1.13 because it couldn't appear in Safari's address bar; its file is deleted on launch. Orbit never writes Safari's databases |
 | **Cookie stores per profile** | A non-default profile's extension listed two stores: `persistent-3` with the profile's tabs, holding the cookie a page just set, and `persistent-4` with no tabs, which is the default for calls without `storeId`. The default profile lists one store. A store with tabs is only listed while the profile is in use | Choose the store listed with this profile's tabs (or the single store in the default profile), otherwise report "no open tab" and retry when the profile is used. Read back after importing. Remove copies that earlier builds put into the unused store |
 | **Profile colors** | `SafariTabs.db` → `settings` table, key `ProfileColor` per profile row (parent = `bookmarks.id`): a keyed archive with `redComponent`/`greenComponent`/`blueComponent`/`alphaComponent`/`colorName` (`clear` = no color). Symbols are in `bookmarks.extra_attributes` → `SymbolImageName`; the default profile's row has `external_uuid = DefaultProfile` | Read-only with Full Disk Access; decode the components; `clear` → gray |
 | **Extension reconnects after updates** | After an update the default profile's instance stopped connecting for minutes. A native message pending while the Orbit app was replaced never settled, and every later `ensure()` waited on that attempt | 8 s timeout on `sendNativeMessage`, and an attempt older than 12 s is abandoned |
@@ -394,6 +386,7 @@ web page (untrusted) ──DOM──► content.js (isolated world)
 2. **Make room:**
    - `:root{--orbit-reserve}` plus `html{margin-right: var(--orbit-reserve)}`.
    - Fixed layers ≥ 40 % of the width are pinned (`right: var(--orbit-reserve)`). Smaller ones are shifted (`translate: calc(-1 * var(--orbit-reserve))`). In-flow `100vw` elements get `max-width: calc(100vw - var(--orbit-reserve))`.
+   - Responsive layouts: the viewport stays as wide as the window, so `content/media.ts` adds the reserve to every width condition of the page's media queries (`(min-width: 1012px)` → `(min-width: 1452px)` with a 440 px sidebar), as if the window were narrower. Cross-origin sheets without CORS are fetched (no cookies) through the background and inserted as a shifted inline copy while the original is disabled. A main-world script (`mainworld.js`, `world: MAIN`) gives the page's scripts the same view: `matchMedia` and `innerWidth` follow `data-orbit-reserve` on `<html>`. Everything is restored when the sidebar closes.
    - The scanner is incremental: added subtrees are walked; class/style changes check only that element. It runs in ≤ 6 ms slices, reads before it writes, and does a cheap 2 s integrity check of the adjusted layers.
 3. **Panel boot:**
    - The host shows the card at once, but the iframe only becomes visible when the panel confirms it booted: a postMessage with a secret nonce from the frame URL, or the background seeing the panel's port for this tab.

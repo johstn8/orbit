@@ -26,7 +26,6 @@
 | 🔗 **Links from other apps** | Make Orbit your default browser, and links from Mail, Messages or Slack open in the right profile, or ask you with the picker. |
 | 🧭 **Website routing** | Rules such as `moodle.uni-example.de → University` open a site in the right profile. The tab you came from stays as it was. |
 | 🔑 **Shared logins** *(opt-in)* | Stay signed in to chosen sites, such as ChatGPT or Google, in several profiles. Nothing is shared unless you turn it on per site. |
-| 🕘 **Shared history** | **⌃⌥H** searches the pages you opened in *any* profile. Orbit keeps this history itself, on your Mac. |
 | ✨ **AI agent sidebar** | Press **⌥⌘K** in Safari to open a sidebar where **Claude** or **ChatGPT** reads and operates your real tabs. With your permission, it can also work with files. |
 | 🛡️ **Permissions you control** | Browser and computer access are set separately and enforced by Orbit, not by the AI. Sensitive actions ask first. |
 
@@ -106,7 +105,6 @@ Then open the sidebar in Safari with **⌥⌘K** or Orbit's toolbar button, and 
 | Shortcut | What it does |
 |---|---|
 | **⌃⌥P** | Profile picker. Within the picker, use **1–9** or the arrow keys and **Return** to choose, and **Esc** to close. |
-| **⌃⌥H** | Search history from all profiles. **Return** opens a page here; **⌘Return** opens it in the profile where you saw it. |
 | **⌥⌘K** | Open or close the AI sidebar in Safari. |
 | **⌥-click** a link | Open it in the current profile, skipping routing rules. |
 
@@ -118,7 +116,7 @@ You can change the picker shortcut, picker designs, routing rules, shared logins
   - Orbit has no servers, no accounts and no analytics.
   - The app and the extension talk over `127.0.0.1` with a random per-launch token. Websites and other machines can't connect.
 - **Your data stays on your Mac.**
-  - Settings, chats and Orbit's history are stored in `~/Library/Application Support/SafariAgent` and are readable only by you.
+  - Settings and chats are stored in `~/Library/Application Support/SafariAgent` and are readable only by you.
   - ChatGPT tokens are kept in the macOS Keychain.
 - **Logins are never exposed to the AI.**
   - Shared-login cookies only pass through memory, and are never stored, logged or given to a model.
@@ -165,7 +163,7 @@ To uninstall:
 ## Limitations
 
 - **The sidebar is part of the page:** Safari has no side-panel API, so the sidebar is attached to each page.
-- **Safari's own history stays separate per profile:** Apple gives extensions no access to it, so Orbit keeps its own shared history instead.
+- **Safari's history stays separate per profile:** Apple gives extensions no access to it.
 - **Shared logins are a copy of the site's cookies:**
   - Signing out isn't mirrored.
   - Sites that tie sessions to a device or use passkeys may still ask you to sign in.

@@ -147,6 +147,12 @@ The prompt-free real-Safari checks verify:
 - **Cause:** Orbit makes room for fixed layers (app shells, headers) when it scans the page and when the page changes its elements. While a tab is hidden, Safari runs no animation frames, so apps such as chatgpt.com finish their layout only after the tab is shown again, often without changing any attribute. Layers measured while hidden (often 0 wide) were never measured again and stayed under the sidebar.
 - **Fix:** when a tab becomes visible again (and on `pageshow`, and on window focus at most every 3 s), Orbit re-applies the page margin and rescans now, after 0.4 s and after 1.5 s. It also watches `<head>`, so a site that rebuilds it can't drop the margin style.
 
+## 1.1.13: sidebar keeps responsive layouts intact, shared history removed
+
+- **Overlapping page parts next to the sidebar** (e.g. github.com repository page). The sidebar narrows the page with a margin, but the viewport kept the window's width, so the page's media queries chose the wide layout. Web Inspector docked to the side really narrows the viewport, which an extension can't do. Orbit now adds the sidebar's width to every width condition of the page's media queries while the sidebar is open (`content/media.ts`), including cross-origin sheets (fetched without cookies and inserted as a shifted copy) and the page's scripts (`mainworld.js` in the page world: `matchMedia`, `innerWidth`). Restored exactly when the sidebar closes; while dragging, the layout switches once the pointer rests.
+- **Shared history removed** (it couldn't appear in Safari's address bar). The ⌃⌥H search window, the settings pane, the visit reports from the extension and the stored `history.json` (deleted on launch) are gone.
+- Tests: Swift 119/119, TypeScript 55/55 (executed; 5 new tests for the media-query shifting). Not yet verified live with the sidebar open in Safari.
+
 ## 1.1.12: picker opened new windows with Stage Manager, pearl highlight
 
 - **Picker opened a new window although one was open.** Orbit decides whether a profile's window is on the current Space by looking at the windows macOS shows on screen. It matched them by frame. With Stage Manager, macOS reports the windows in the side strip at their thumbnail size, so they never matched and Orbit opened a new window. Orbit now matches windows by their window id (and compares the extension's window bounds with the real window frames). Seen live: the Quant window was on screen by id but not by frame.

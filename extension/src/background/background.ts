@@ -599,32 +599,6 @@ browser.windows?.getLastFocused?.({ windowTypes: ["normal"] }).then((w: any) => 
   if (w?.id !== undefined && lastFocusedWindowId === null) lastFocusedWindowId = w.id;
 }).catch(() => {});
 
-// ---------------- shared history (Orbit keeps it; Safari has no history API) ----------------
-
-const visitQueue: { url: string; title: string }[] = [];
-const lastVisit = new Map<number, string>();
-browser.tabs.onUpdated.addListener((tabId: number, info: any, tab: any) => {
-  if (info.status !== "complete" && !info.title) return;
-  if (!tab || tab.incognito || !/^https?:/i.test(tab.url || "")) return;
-  if (instanceConfig && instanceConfig.recordHistory === false) return;
-  const key = `${tab.url}|${tab.title || ""}`;
-  if (lastVisit.get(tabId) === key) return;
-  lastVisit.set(tabId, key);
-  visitQueue.push({ url: tab.url, title: tab.title || "" });
-  if (visitQueue.length > 300) visitQueue.splice(0, visitQueue.length - 300);
-  flushVisits();
-});
-browser.tabs.onRemoved.addListener((tabId: number) => lastVisit.delete(tabId));
-let flushTimer: any = null;
-function flushVisits() {
-  clearTimeout(flushTimer);
-  flushTimer = setTimeout(() => {
-    helper.ensure().then(() => {
-      while (visitQueue.length) helper.send({ type: "event", name: "visit", data: visitQueue.shift() });
-    }).catch(() => {});
-  }, 800);
-}
-
 // Wake up regularly so the Orbit app can reach this profile (open links, routing, shared logins).
 browser.alarms?.create?.("orbit-keepalive", { periodInMinutes: 1 });
 browser.alarms?.onAlarm?.addListener(() => helper.ensure().catch(() => {}));
@@ -721,6 +695,22 @@ browser.runtime.onMessage.addListener((msg: any, sender: any, sendResponse: (r: 
         });
       });
       return true;
+    case "fetch_css": {
+      // A cross-origin stylesheet of the page whose rules the content script can't read
+      // (no CORS): fetched without cookies so its width queries can follow the sidebar.
+      let u: URL | null = null;
+      try { u = new URL(String(msg.url)); } catch { u = null; }
+      if (!u || !/^https?:$/.test(u.protocol) || tabId === undefined) { sendResponse({ ok: false }); return; }
+      fetch(u.href, { credentials: "omit", cache: "force-cache", redirect: "follow" })
+        .then(async (r) => {
+          const type = r.headers.get("content-type") || "";
+          if (!r.ok || (type && !/css|text\/plain|octet-stream/i.test(type))) return sendResponse({ ok: false });
+          const css = await r.text();
+          sendResponse(css.length > 8_000_000 ? { ok: false } : { ok: true, css });
+        })
+        .catch(() => sendResponse({ ok: false }));
+      return true;
+    }
     case "panel_width":
       state.settings.panelWidth = Math.max(320, Math.min(900, Number(msg.width) || 420));
       saveSettings();

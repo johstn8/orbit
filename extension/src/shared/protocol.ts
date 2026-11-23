@@ -128,8 +128,6 @@ export interface InstanceConfig {
   };
   sharing: { id: string; domain: string; extraDomains: string[]; sourceProfileId: string; targets: string[]; excludedCookies: string[] }[];
   computerAccess: ComputerAccess;
-  /** Report visited pages for Orbit's shared history (never in private windows). */
-  recordHistory?: boolean;
 }
 
 export interface Settings {

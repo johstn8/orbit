@@ -354,7 +354,7 @@ final class Hub {
     }
 
     private func settingsChanged(_ old: AppSettings, _ new: AppSettings) {
-        if old.routing != new.routing || old.sharing != new.sharing || old.profiles != new.profiles || old.agent.computerAccess != new.agent.computerAccess || old.history != new.history {
+        if old.routing != new.routing || old.sharing != new.sharing || old.profiles != new.profiles || old.agent.computerAccess != new.agent.computerAccess {
             pushConfig()
         }
         if old.sharing != new.sharing { SessionSharing.shared.settingsChanged(old.sharing, new.sharing) }
@@ -376,8 +376,6 @@ final class Hub {
             DispatchQueue.main.async { ProfileRegistry.shared.profileFocused(profile, left: left, size: size) }
         case "window_created":
             DispatchQueue.main.async { ProfileRegistry.shared.windowCreated(profile) }
-        case "visit":
-            HistoryStore.shared.add(profileId: profile, url: data["url"] as? String ?? "", title: data["title"] as? String ?? "")
         case "cookies_changed":
             SessionSharing.shared.cookiesChanged(profile: profile, domain: data["domain"] as? String ?? "")
         default:
@@ -495,10 +493,6 @@ final class Hub {
                     reply(.success(["accessibility": AXIsProcessTrusted(), "automation": String(describing: auto)]))
                 }
             }
-        case "debug.history_forget":
-            guard c.role == "driver", let host = p["host"] as? String else { return reply(.failure(AgentError("forbidden", "Not allowed."))) }
-            HistoryStore.shared.forget(host: host)
-            reply(.success(["ok": true]))
         case "debug.safari_db":
             guard c.role == "driver" else { return reply(.failure(AgentError("forbidden", "Not allowed."))) }
             reply(.success(SafariProfileStore.describeSchema()))

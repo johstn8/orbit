@@ -5,7 +5,7 @@ import ServiceManagement
 import Carbon.HIToolbox
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, profiles, appearance, routing, logins, history, agent, about
+    case general, profiles, appearance, routing, logins, agent, about
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -14,7 +14,6 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .appearance: "Picker Appearance"
         case .routing: "Website Routing"
         case .logins: "Shared Logins"
-        case .history: "Shared History"
         case .agent: "AI Agent"
         case .about: "About"
         }
@@ -26,7 +25,6 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .appearance: "circle.grid.cross"
         case .routing: "arrow.triangle.branch"
         case .logins: "key.horizontal"
-        case .history: "clock.arrow.circlepath"
         case .agent: "sparkles"
         case .about: "info.circle"
         }
@@ -57,7 +55,6 @@ struct SettingsView: View {
                 case .appearance: AppearancePane()
                 case .routing: RoutingPane()
                 case .logins: LoginsPane()
-                case .history: HistoryPane()
                 case .agent: AgentPane(model: model)
                 case .about: AboutPane(model: model)
                 }
@@ -912,60 +909,6 @@ struct SiteBadge: View {
             .foregroundStyle(.white)
             .frame(width: 32, height: 32)
             .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color(hex: color).gradient))
-    }
-}
-
-// MARK: - Shared history
-
-struct HistoryPane: View {
-    @ObservedObject private var store = SettingsStore.shared
-    @ObservedObject private var history = HistoryStore.shared
-    @State private var confirmClear = false
-
-    var body: some View {
-        Form {
-            Section {
-                Toggle("Remember pages from all Safari profiles", isOn: setting({ $0.history.enabled }, { $0.history.enabled = $1 }))
-                HStack {
-                    Text("Search shortcut")
-                    Spacer()
-                    Toggle("", isOn: setting({ $0.history.hotkeyEnabled }, { $0.history.hotkeyEnabled = $1 })).labelsHidden()
-                    Text(HotKey.describe(keyCode: store.settings.history.hotkeyKeyCode, modifiers: store.settings.history.hotkeyModifiers))
-                        .font(.system(.body, design: .rounded).weight(.medium)).foregroundStyle(.secondary)
-                    Button("Search…") { HistoryPanelController.shared.toggle() }
-                }
-                Picker("Keep pages for", selection: setting({ $0.history.retentionDays }, { $0.history.retentionDays = $1 })) {
-                    Text("1 week").tag(7)
-                    Text("1 month").tag(30)
-                    Text("3 months").tag(90)
-                    Text("1 year").tag(365)
-                }
-            } footer: {
-                Text("Safari keeps a separate history for each profile and doesn't let extensions read or change it. Orbit therefore keeps its own history of the pages you open in any profile, so you can find a page from University while you're in Personal (⌃⌥H). Return opens it in your current profile, ⌘Return in the profile you saw it in. Private windows are never recorded; everything stays on this Mac and the AI agent can't read it.")
-            }
-            Section("Don't record") {
-                ForEach(store.settings.listedProfiles) { p in
-                    Toggle(isOn: Binding(get: { store.settings.history.excludedProfiles.contains(p.id) }, set: { v in
-                        SettingsStore.shared.update { s in
-                            if v { if !s.history.excludedProfiles.contains(p.id) { s.history.excludedProfiles.append(p.id) } } else { s.history.excludedProfiles.removeAll { $0 == p.id } }
-                        }
-                    })) { Label(p.name, systemImage: p.symbol) }
-                }
-            }
-            Section {
-                HStack {
-                    Text("\(history.count) pages stored")
-                    Spacer()
-                    Button("Clear Orbit History…", role: .destructive) { confirmClear = true }
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .confirmationDialog("Clear Orbit's shared history?", isPresented: $confirmClear) {
-            Button("Clear History", role: .destructive) { HistoryStore.shared.clear() }
-        } message: {
-            Text("This removes the pages Orbit remembered. Safari's own history isn't affected.")
-        }
     }
 }
 

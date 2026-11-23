@@ -8,6 +8,7 @@ import {
   typeInto, setFormValue, pressKey, keySubmitsForm, scrollPage, PANEL_HOST_TAG, INDICATOR_ID, refFor, controlFor,
 } from "./dom-tools";
 import { routeTarget } from "../shared/routing";
+import { createMediaShifter } from "./media";
 
 declare const browser: any;
 
@@ -21,6 +22,7 @@ function main() {
   const NOTICE_ID = "orbit-route-notice";
   const stats: any = { frameLoadMs: 0, readyMs: 0, staleFrames: 0, panelCreates: 0, panelHides: 0, slices: 0, maxSliceMs: 0, adjusted: 0, reattached: 0, focusRestores: 0 };
   w.__orbitStats = stats;
+  Object.defineProperty(stats, "media", { get: () => media.stats(), enumerable: true });
 
   // ---------------- routing config (rules are not secret) ----------------
   let cfg: any = null;
@@ -43,7 +45,19 @@ function main() {
 
   // Page flow is pushed with html{margin-right}. Layers adjusted below refer to
   // --orbit-reserve, so resizing only rewrites this one style element.
+  // The page's media queries (and matchMedia/innerWidth in its scripts) see the width
+  // beside the sidebar, so responsive layouts switch like with a narrower window.
+  const media = createMediaShifter((n) => !!(n as Element).hasAttribute?.("data-safari-agent") || (!!panelHost && panelHost.contains(n)));
+  let mediaTimer: any = null;
+  const syncMedia = () => {
+    const px = wanted ? reserve() : 0;
+    clearTimeout(mediaTimer);
+    // While the sidebar is dragged, the layout switches once the pointer rests.
+    if (!animate && px && media.reserve) mediaTimer = setTimeout(() => media.set(wanted ? reserve() : 0), 120);
+    else media.set(px);
+  };
   const writePush = () => {
+    syncMedia();
     if (!wanted) {
       pushStyle?.remove();
       pushStyle = null;

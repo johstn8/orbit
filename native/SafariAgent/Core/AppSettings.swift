@@ -136,17 +136,6 @@ struct PickerSettings: Codable, Equatable {
     var hotkeyModifiers: UInt32 = 0x0800 | 0x1000 // optionKey | controlKey (Carbon)
 }
 
-/// Orbit's shared history (all Safari profiles), searchable from a global shortcut.
-struct HistorySettings: Codable, Equatable {
-    var enabled = true
-    var retentionDays = 90
-    /// Profiles whose visits are never recorded.
-    var excludedProfiles: [String] = []
-    var hotkeyEnabled = true
-    var hotkeyKeyCode: UInt32 = 4          // H
-    var hotkeyModifiers: UInt32 = 0x0800 | 0x1000 // optionKey | controlKey
-}
-
 /// What happens when Safari has no window and you click its Dock icon.
 struct SafariSettings: Codable, Equatable {
     /// "profile" = open a window of `noWindowProfile` (nil = Safari's default profile),
@@ -158,7 +147,6 @@ struct SafariSettings: Codable, Equatable {
 struct AppSettings: Codable, Equatable {
     var profiles: [ProfileConfig] = []
     var safari = SafariSettings()
-    var history = HistorySettings()
     var picker = PickerSettings()
     var routing = RoutingSettings()
     var sharing: [SharedSite] = []
@@ -266,7 +254,6 @@ extension AppSettings {
             ],
             "sharing": sites,
             "computerAccess": agent.computerAccess,
-            "recordHistory": history.enabled && !history.excludedProfiles.contains(profileId),
         ]
     }
 }
