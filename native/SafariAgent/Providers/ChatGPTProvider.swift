@@ -70,6 +70,7 @@ final class ChatGPTProvider: Provider {
                 s["efforts"] = [["id": "low", "name": "Light"], ["id": "medium", "name": "Standard"], ["id": "high", "name": "Extended"]]
                 s["defaultEffort"] = "low"
                 s["account"] = c?.email
+                CodexUsage.refresh(accountEmail: c?.email)
                 s["detail"] = ms.isEmpty ? "Your ChatGPT account has no models available for plan usage." : "Signed in with ChatGPT."
             } catch let e as AgentError {
                 s["available"] = false
@@ -200,7 +201,8 @@ final class ChatGPTProvider: Provider {
         for (k, v) in http.allHeaderFields {
             if let k = k as? String { h[k.lowercased()] = "\(v)" }
         }
-        let limitLike = h.filter { k, _ in k.contains("ratelimit") || k.contains("rate-limit") || k.contains("codex") || k.contains("usage") || k.contains("limit") }
+        // Opaque state tokens (x-codex-turn-state) are left out.
+        let limitLike = h.filter { k, _ in (k.contains("ratelimit") || k.contains("rate-limit") || k.contains("codex") || k.contains("usage") || k.contains("limit")) && !k.contains("state") }
         lastHeaders[http.url?.path ?? ""] = ["names": h.keys.sorted(), "limits": limitLike, "status": http.statusCode]
         UsageStore.shared.update("chatgpt", UsageStore.fromHeaders(h))
     }
@@ -269,6 +271,7 @@ final class ChatGPTProvider: Provider {
                 try await self.agentLoop(items: &items, model: modelId, effort: effort, sink: sink)
                 hub.store.saveItems(convId, Self.compact(items))
                 sink.finish(cancelled: Task.isCancelled || sink.isCancelled)
+                CodexUsage.refresh(accountEmail: self.currentCreds()?.email, force: true)
             } catch {
                 // Keep history consistent even on failure/cancel.
                 hub.store.saveItems(convId, Self.compact(Self.closeDanglingCalls(items)))

@@ -370,6 +370,8 @@ do {
                                     "x-codex-secondary-used-percent": "3", "x-codex-secondary-window-minutes": "10080"], now: 100)
     check(h.count == 2 && h[0].used == 12.5 && h[0].resetsAt == 160 && h[1].id == "weekly", "ChatGPT: rate-limit headers")
     check(UsageStore.fromHeaders(["content-type": "text/event-stream"]).isEmpty, "no limit headers, no windows")
+    let cx = CodexUsage.windows(["primary": ["usedPercent": 6, "windowDurationMins": 300, "resetsAt": 1795465218], "secondary": ["usedPercent": 12, "windowDurationMins": 10080, "resetsAt": 1795603524]])
+    check(cx.count == 2 && cx[0].id == "five_hour" && cx[0].used == 6 && cx[1].id == "weekly" && cx[1].used == 12 && cx[1].resetsAt == 1795603524, "ChatGPT: limits from the Codex app server")
 }
 
 print("\n\(passes) passed, \(failures) failed")

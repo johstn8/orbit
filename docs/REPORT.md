@@ -147,6 +147,13 @@ The prompt-free real-Safari checks verify:
 - **Cause:** Orbit makes room for fixed layers (app shells, headers) when it scans the page and when the page changes its elements. While a tab is hidden, Safari runs no animation frames, so apps such as chatgpt.com finish their layout only after the tab is shown again, often without changing any attribute. Layers measured while hidden (often 0 wide) were never measured again and stayed under the sidebar.
 - **Fix:** when a tab becomes visible again (and on `pageshow`, and on window focus at most every 3 s), Orbit re-applies the page margin and rescans now, after 0.4 s and after 1.5 s. It also watches `<head>`, so a site that rebuilds it can't drop the margin style.
 
+## 1.1.15: ChatGPT usage ring
+
+- **ChatGPT showed no ring.** Checked live: ChatGPT's replies to Orbit carry no limits (neither headers nor stream events), and ChatGPT's usage service (`chatgpt.com/backend-api/wham/usage`) rejects Orbit's sign-in (401).
+- **Now:** Orbit asks the user's installed, unmodified Codex app through its local app server (`codex app-server`, JSON-RPC over stdio: `account/read`, `account/rateLimits/read`). That is a read and uses no quota; Orbit never reads Codex's credentials. The limits are only used when Codex is signed in to the same ChatGPT account as Orbit. Refreshed when the provider status is checked (at most once a minute) and after every ChatGPT reply.
+- Verified live: 5-hour 6 %, weekly 12 % for ChatGPT; no `codex app-server` process is left running.
+- Tests: Swift 125/125, TypeScript 55/55 (executed).
+
 ## 1.1.14: plan usage ring, narrow composer
 
 - **Plan usage in the sidebar.** A ring next to the settings button shows the higher of the 5-hour and weekly limit (Claude orange, ChatGPT blue, amber from 90 %). Hovering shows each limit as a bar with its reset time.
