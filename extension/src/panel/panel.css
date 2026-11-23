@@ -267,7 +267,16 @@ textarea {
   font: 14px/1.45 var(--ui); padding: 6px 2px; max-height: 200px; min-height: 30px;
 }
 textarea::placeholder { color: var(--fg-3); }
-.composer-bar { display: flex; align-items: center; gap: 4px; margin-top: 2px; }
+.composer-bar { display: flex; align-items: center; gap: 4px; margin-top: 2px; container-type: inline-size; min-width: 0; }
+/* Narrow sidebar (or strong zoom): options shrink to their icons so Send stays visible. */
+@container (max-width: 330px) {
+  .pill { padding: 6px 7px; }
+  .pill .pill-text, .pm-effort { display: none; }
+}
+@container (max-width: 210px) {
+  .pm-name { max-width: 64px; overflow: hidden; text-overflow: ellipsis; }
+  .picker-btn { padding: 5px 6px; }
+}
 .spacer { flex: 1; }
 .pill {
   display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; color: var(--fg-2);
@@ -275,7 +284,7 @@ textarea::placeholder { color: var(--fg-3); }
 }
 .pill:hover { background: var(--hover); color: var(--fg); }
 .pill.warn { color: var(--warn); }
-.picker { position: relative; }
+.picker { position: relative; min-width: 0; }
 .picker-btn {
   display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; border-radius: 999px;
   padding: 5px 8px 5px 10px; font-size: 12.5px; color: var(--fg); white-space: nowrap; transition: background .15s;
@@ -364,3 +373,24 @@ textarea::placeholder { color: var(--fg-3); }
   .hljs-variable, .hljs-params { color: #a3b1bf; }
 }
 .row-profile { color: var(--accent); font-weight: 500; }
+
+/* ---------- plan usage ring (top bar) ---------- */
+.usage { position: relative; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 17px; outline: none; }
+.usage:hover, .usage:focus-visible { background: var(--hover); }
+.usage-track { fill: none; stroke: var(--line); stroke-width: 2.6; }
+.usage-fill { fill: none; stroke: var(--accent); stroke-width: 2.6; stroke-linecap: round; transition: stroke-dashoffset .4s var(--ease); }
+.usage-fill.high, .usage-bar-fill.high { stroke: var(--warn); background: var(--warn); }
+.usage-pop {
+  display: none; position: absolute; top: calc(100% + 8px); right: -4px; width: 240px; z-index: 30; padding: 12px 14px 10px;
+  background: var(--menu-bg); border-radius: 16px; color: var(--fg); cursor: default;
+  -webkit-backdrop-filter: blur(30px) saturate(180%); backdrop-filter: blur(30px) saturate(180%);
+  box-shadow: 0 0 0 .5px var(--line), 0 10px 30px rgba(0, 0, 0, .2), 0 2px 6px rgba(0, 0, 0, .08);
+}
+.usage:hover .usage-pop, .usage:focus-within .usage-pop { display: block; animation: pop .14s var(--ease); transform-origin: top right; }
+.usage-row + .usage-row { margin-top: 12px; }
+.usage-name { font-size: 12.5px; font-weight: 550; }
+.usage-meta { display: flex; justify-content: flex-end; gap: 8px; font-size: 11.5px; color: var(--fg-2); margin: 2px 0 5px; }
+.usage-pct { font-variant-numeric: tabular-nums; min-width: 34px; text-align: right; }
+.usage-bar { height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.usage-bar-fill { height: 100%; border-radius: 3px; background: var(--accent); transition: width .4s var(--ease); }
+.usage-foot { margin-top: 10px; font-size: 10.5px; color: var(--fg-3); }

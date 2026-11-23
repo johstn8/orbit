@@ -147,6 +147,14 @@ The prompt-free real-Safari checks verify:
 - **Cause:** Orbit makes room for fixed layers (app shells, headers) when it scans the page and when the page changes its elements. While a tab is hidden, Safari runs no animation frames, so apps such as chatgpt.com finish their layout only after the tab is shown again, often without changing any attribute. Layers measured while hidden (often 0 wide) were never measured again and stayed under the sidebar.
 - **Fix:** when a tab becomes visible again (and on `pageshow`, and on window focus at most every 3 s), Orbit re-applies the page margin and rescans now, after 0.4 s and after 1.5 s. It also watches `<head>`, so a site that rebuilds it can't drop the margin style.
 
+## 1.1.14: plan usage ring, narrow composer
+
+- **Plan usage in the sidebar.** A ring next to the settings button shows the higher of the 5-hour and weekly limit (Claude orange, ChatGPT blue, amber from 90 %). Hovering shows each limit as a bar with its reset time.
+  - No extra request is made, so no quota is used: Claude Code reports the limits in its normal stream (`rate_limit_event` → `rate_limit_info.unifiedWindows`, utilization as a fraction). For ChatGPT, Orbit reads Codex-style limits from the headers (`x-codex-primary-used-percent`, …) or a `rate_limits` object of normal responses. ChatGPT's model list (checked live) carries no limit headers, so whether `/responses` does is not verified yet.
+  - The last values are kept in `usage.json` (0600, percentages and reset times only). A window whose reset time has passed counts as 0 %. The ring appears after the first reply that reports limits.
+- **Narrow sidebar.** The composer bar is a size container: below 330 px the approval option shows only its shield and the model picker drops the effort label, so Send stays visible.
+- Tests: Swift 124/124 (5 new for the limit parsing), TypeScript 55/55 (executed). The UI was not checked live in Safari.
+
 ## 1.1.13: sidebar keeps responsive layouts intact, shared history removed
 
 - **Overlapping page parts next to the sidebar** (e.g. github.com repository page). The sidebar narrows the page with a margin, but the viewport kept the window's width, so the page's media queries chose the wide layout. Web Inspector docked to the side really narrows the viewport, which an extension can't do. Orbit now adds the sidebar's width to every width condition of the page's media queries while the sidebar is open (`content/media.ts`), including cross-origin sheets (fetched without cookies and inserted as a shifted copy) and the page's scripts (`mainworld.js` in the page world: `matchMedia`, `innerWidth`). Restored exactly when the sidebar closes; while dragging, the layout switches once the pointer rests.

@@ -265,6 +265,9 @@ final class ClaudeSession {
                 default: break
                 }
             }
+        case "rate_limit_event":
+            // Claude Code's own report of the plan limits (no extra request).
+            if let info = m["rate_limit_info"] as? JSONObject { UsageStore.shared.update("claude", UsageStore.fromClaude(info)) }
         case "result":
             guard let s = sink else { return }
             sink = nil

@@ -207,6 +207,8 @@ async function refreshAfterConnect() {
     state.running = !!runningConversationId && runningConversationId === state.conversation?.id;
     const agent = await helper.request("settings.agent").catch(() => null);
     if (agent) setAgentAccess(agent);
+    const usage = await helper.request("usage.get").catch(() => null);
+    if (usage && typeof usage === "object") state.usage = usage;
   } catch (e: any) {
     console.warn("refresh failed", e?.message);
   }
@@ -242,6 +244,9 @@ function onHelperMessage(msg: any) {
     case "conversations":
       state.conversations = msg.conversations;
       broadcast();
+      break;
+    case "usage":
+      if (msg.usage && typeof msg.usage === "object") { state.usage = msg.usage; broadcast(); }
       break;
     case "event":
       applyEvent(msg.conversationId, msg.event);

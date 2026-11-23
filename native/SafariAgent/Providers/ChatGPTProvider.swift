@@ -182,11 +182,27 @@ final class ChatGPTProvider: Provider {
         req.timeoutInterval = 180
         let (bytes, resp) = try await URLSession.shared.bytes(for: req)
         guard let http = resp as? HTTPURLResponse else { throw AgentError("network_error", "Could not reach ChatGPT.") }
+        noteLimits(http)
         if http.statusCode == 401 && retry {
             _ = try await accessToken(forceRefresh: true)
             return try await authorizedRequest(url, method: method, body: body, stream: stream, retry: false)
         }
         return (bytes, http)
+    }
+
+    /// Header names of the last response and the values of its rate-limit headers (for
+    /// diagnostics; never the authorization or cookies).
+    private(set) var lastHeaders: [String: JSONObject] = [:]
+
+    /// Plan usage limits from the response headers (no extra request).
+    private func noteLimits(_ http: HTTPURLResponse) {
+        var h: [String: String] = [:]
+        for (k, v) in http.allHeaderFields {
+            if let k = k as? String { h[k.lowercased()] = "\(v)" }
+        }
+        let limitLike = h.filter { k, _ in k.contains("ratelimit") || k.contains("rate-limit") || k.contains("codex") || k.contains("usage") || k.contains("limit") }
+        lastHeaders[http.url?.path ?? ""] = ["names": h.keys.sorted(), "limits": limitLike, "status": http.statusCode]
+        UsageStore.shared.update("chatgpt", UsageStore.fromHeaders(h))
     }
 
     private static func readAll(_ bytes: URLSession.AsyncBytes, limit: Int = 4_000_000) async throws -> Data {
@@ -393,6 +409,10 @@ final class ChatGPTProvider: Provider {
         var sawText = false
         func handle(_ data: String) throws -> Bool {
             guard let ev = JSON.parse(data) else { return false }
+            // Plan limits, when the stream reports them (Codex-style `rate_limits`).
+            if let rl = (ev["rate_limits"] as? JSONObject) ?? ((ev["response"] as? JSONObject)?["rate_limits"] as? JSONObject) {
+                UsageStore.shared.update("chatgpt", UsageStore.fromRateLimits(rl))
+            }
             switch ev["type"] as? String {
             case "response.output_text.delta":
                 if let d = ev["delta"] as? String { sawText = true; sink.text(d) }

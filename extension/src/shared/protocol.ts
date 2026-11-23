@@ -166,6 +166,20 @@ export interface PanelState {
   /** All Safari profiles (to label chats from other profiles in the shared history). */
   profiles?: ProfileInfo[];
   agent: AgentAccess;
+  /** Plan usage limits each provider last reported (5-hour and weekly). */
+  usage?: Record<string, ProviderUsage>;
+}
+
+export interface UsageWindow {
+  id: "five_hour" | "weekly" | string;
+  /** Percent used, 0–100. */
+  used: number;
+  /** Seconds since 1970, or null. */
+  resetsAt: number | null;
+}
+export interface ProviderUsage {
+  updatedAt: number;
+  windows: UsageWindow[];
 }
 
 /** Per-tab panel state (draft text and focus survive page navigations). */

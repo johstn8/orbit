@@ -278,6 +278,7 @@ function Header({ s, view, setView }: { s: PanelState; view: string; setView: (v
         <span>{title}</span>
       </div>
       <div className="capsule">
+        <UsageRing s={s} />
         <button className={`cap-btn ${view === "settings" ? "on" : ""}`} title="Settings" onClick={() => setView(view === "settings" ? "chat" : "settings")}>{I.gear}</button>
         {mode === "page" && (
           <>
@@ -287,6 +288,57 @@ function Header({ s, view, setView }: { s: PanelState; view: string; setView: (v
         )}
       </div>
     </header>
+  );
+}
+
+// ---------- plan usage (5-hour and weekly limits) ----------
+
+const USAGE_LABEL: Record<string, string> = { five_hour: "5-hour limit", weekly: "Weekly · all models" };
+
+export function formatReset(resetsAt: number | null, now = Date.now()): string {
+  if (!resetsAt) return "";
+  const d = new Date(resetsAt * 1000);
+  const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const sameDay = new Date(now).toDateString() === d.toDateString();
+  if (sameDay) return `Resets at ${time}`;
+  if (resetsAt * 1000 - now < 6 * 86400_000) return `Resets ${d.toLocaleDateString(undefined, { weekday: "short" })} ${time}`;
+  return `Resets ${d.toLocaleDateString(undefined, { day: "numeric", month: "short" })} ${time}`;
+}
+
+/** Ring filled to the higher of the provider's limits; hovering shows each limit as a bar. */
+function UsageRing({ s }: { s: PanelState }) {
+  const p = currentProvider(s);
+  const u = p ? s.usage?.[p.id] : undefined;
+  const [, tick] = useState(0);
+  useEffect(() => { const t = setInterval(() => tick((n) => n + 1), 60_000); return () => clearInterval(t); }, []);
+  if (!p || !u || !u.windows.length) return null;
+  const now = Date.now();
+  // A window whose reset time has passed starts over at 0 %.
+  const wins = u.windows.map((w) => (w.resetsAt && w.resetsAt * 1000 <= now ? { ...w, used: 0, resetsAt: null } : w));
+  const max = Math.max(...wins.map((w) => w.used));
+  const r = 7.5, c = 2 * Math.PI * r;
+  const pct = (n: number) => `${Math.round(n)} %`;
+  const asOf = new Date(u.updatedAt * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return (
+    <>
+      <div className="usage" tabIndex={0} aria-label={`${p.name} usage: ${pct(max)}`}>
+        <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
+          <circle cx="10" cy="10" r={r} className="usage-track" />
+          <circle cx="10" cy="10" r={r} className={`usage-fill ${max >= 90 ? "high" : ""}`} strokeDasharray={c} strokeDashoffset={c * (1 - Math.min(100, max) / 100)} transform="rotate(-90 10 10)" />
+        </svg>
+        <div className="usage-pop" role="tooltip">
+          {wins.map((w) => (
+            <div className="usage-row" key={w.id}>
+              <div className="usage-name">{USAGE_LABEL[w.id] || w.id}</div>
+              <div className="usage-meta"><span>{formatReset(w.resetsAt, now)}</span><span className="usage-pct">{pct(w.used)}</span></div>
+              <div className="usage-bar"><div className={`usage-bar-fill ${w.used >= 90 ? "high" : ""}`} style={{ width: `${Math.min(100, w.used)}%` }} /></div>
+            </div>
+          ))}
+          <div className="usage-foot">{p.name} · as of {asOf}</div>
+        </div>
+      </div>
+      <span className="cap-div" />
+    </>
   );
 }
 
@@ -387,7 +439,7 @@ function ApprovalPill({ s }: { s: PanelState }) {
   return (
     <div className="picker" ref={ref}>
       <button className={`pill ${s.settings.approvalMode === "never" ? "warn" : ""}`} onClick={() => setOpen(!open)} title="When to ask before acting">
-        {I.shield}<span>{APPROVAL_LABEL[s.settings.approvalMode]}{SCOPE_SHORT[s.settings.tabScope] || ""}{s.agent.computerAccess !== "none" ? " · files" : ""}</span>
+        {I.shield}<span className="pill-text">{APPROVAL_LABEL[s.settings.approvalMode]}{SCOPE_SHORT[s.settings.tabScope] || ""}{s.agent.computerAccess !== "none" ? " · files" : ""}</span>
       </button>
       {open && (
         <div className="menu left" role="menu">

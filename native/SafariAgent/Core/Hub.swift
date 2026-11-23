@@ -132,6 +132,10 @@ final class Hub {
         server = WebSocketServer(queue: queue)
         claude = ClaudeProvider(hub: self)
         chatgpt = ChatGPTProvider(hub: self)
+        UsageStore.shared.onChange = { [weak self] in
+            guard let self else { return }
+            self.queue.async { self.broadcastAll(["type": "usage", "usage": UsageStore.shared.json()]) }
+        }
     }
 
     // MARK: lifecycle
@@ -409,6 +413,8 @@ final class Hub {
             sendConversations()
         case "chat.send":
             chatSend(p, profile: profile ?? "default", reply: reply)
+        case "usage.get":
+            reply(.success(UsageStore.shared.json()))
         case "chat.cancel":
             if let id = p["conversationId"] as? String, let r = runs[id] { cancel(r) }
             reply(.success(["ok": true]))
@@ -496,6 +502,13 @@ final class Hub {
         case "debug.safari_db":
             guard c.role == "driver" else { return reply(.failure(AgentError("forbidden", "Not allowed."))) }
             reply(.success(SafariProfileStore.describeSchema()))
+        case "debug.chatgpt_headers":
+            // Local test driver only: header names of ChatGPT's model list (a free request).
+            guard c.role == "driver" else { return reply(.failure(AgentError("forbidden", "Not allowed."))) }
+            Task {
+                if p["peek"] as? Bool != true { _ = try? await self.chatgpt.listModels(force: true) }
+                reply(.success(["headers": self.chatgpt.lastHeaders, "usage": UsageStore.shared.json()]))
+            }
         case "debug.windows":
             // Local test driver only: Safari's windows as Orbit sees them (no titles or URLs).
             guard c.role == "driver" else { return reply(.failure(AgentError("forbidden", "Not allowed."))) }

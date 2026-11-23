@@ -358,5 +358,19 @@ do {
     check(moved.sharing[0].newestIn == "B" && moved.sharing[0].syncedTargets["B"] == 5, "profile id changes carry the newest holder and sync state")
 }
 
+section("Usage limits from the providers' own reports")
+do {
+    let c = UsageStore.fromClaude(["status": "allowed", "unifiedWindows": ["five_hour": ["utilization": 0.12, "resetsAt": 1000], "seven_day": ["utilization": 0.05, "resetsAt": 2000]]])
+    check(c.count == 2 && abs(c[0].used - 12) < 0.001 && c[0].id == "five_hour" && c[1].id == "weekly" && c[1].resetsAt == 2000, "Claude: both windows from unifiedWindows, fraction to percent")
+    let single = UsageStore.fromClaude(["status": "allowed_warning", "rateLimitType": "seven_day_opus", "utilization": 0.8, "resetsAt": 5])
+    check(single.count == 1 && single[0].id == "weekly" && abs(single[0].used - 80) < 0.001, "Claude: a single reported window")
+    let r = UsageStore.fromRateLimits(["primary": ["used_percent": 8.0, "window_minutes": 300, "resets_at": 1795179764], "secondary": ["used_percent": 6.0, "window_minutes": 10080, "resets_at": 1795603524]])
+    check(r.count == 2 && r[0].id == "five_hour" && r[0].used == 8 && r[1].id == "weekly", "ChatGPT: rate_limits primary/secondary by window length")
+    let h = UsageStore.fromHeaders(["x-codex-primary-used-percent": "12.5", "x-codex-primary-window-minutes": "300", "x-codex-primary-reset-after-seconds": "60",
+                                    "x-codex-secondary-used-percent": "3", "x-codex-secondary-window-minutes": "10080"], now: 100)
+    check(h.count == 2 && h[0].used == 12.5 && h[0].resetsAt == 160 && h[1].id == "weekly", "ChatGPT: rate-limit headers")
+    check(UsageStore.fromHeaders(["content-type": "text/event-stream"]).isEmpty, "no limit headers, no windows")
+}
+
 print("\n\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
