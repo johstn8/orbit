@@ -1,7 +1,8 @@
 import React, { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { ApprovalMode, Block, ComputerAccess, PanelState, PanelToBackground, ProviderId, ProviderStatus, TabPanelState, TabScope, UIMessage } from "../shared/protocol";
+import type { ApprovalMode, Block, ComputerAccess, OutgoingAttachment, PanelState, PanelToBackground, ProviderId, ProviderStatus, TabPanelState, TabScope, UIMessage } from "../shared/protocol";
 import { renderMarkdown } from "./markdown";
+import { classifyFile, MAX_FILES, MAX_TOTAL } from "./files";
 import "./panel.css";
 
 declare const browser: any;
@@ -77,6 +78,7 @@ const I = {
   ),
   stop: <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true"><rect x="3.5" y="3.5" width="13" height="13" rx="3" fill="currentColor" /></svg>,
   plus: S(<path d="M10 4.5v11M4.5 10h11" />),
+  clip: S(<path d="M15.5 9.2 10 14.7a3.4 3.4 0 0 1-4.8-4.8l5.7-5.7a2.3 2.3 0 0 1 3.2 3.2l-5.6 5.6a1.1 1.1 0 0 1-1.6-1.6l5-5" />),
   chevDown: S(<path d="M6 8l4 4 4-4" />, 12),
   chevRight: S(<path d="M8 5.5l4.5 4.5L8 14.5" />, 12),
   check: S(<path d="M5 10.5l3.2 3L15 6.5" />, 14),
@@ -250,7 +252,26 @@ function AssistantMessageView({ m, live }: { m: UIMessage; live: boolean }) {
 
 function UserMessageView({ m }: { m: UIMessage }) {
   const t = m.blocks.map((b) => (b.type === "text" ? b.text : "")).join("");
-  return <div className="msg user"><div className="bubble">{t}</div></div>;
+  const files = m.blocks.filter((b) => b.type === "attachment") as { type: "attachment"; name: string; detail?: string }[];
+  return (
+    <div className="msg user">
+      {files.length > 0 && (
+        <div className="att-list sent">{files.map((f, i) => <span className="att" key={i} title={f.name}>{I.doc}<span className="att-name">{f.name}</span></span>)}</div>
+      )}
+      <div className="bubble">{t}</div>
+    </div>
+  );
+}
+
+// ---------- attachments ----------
+
+function readFile(f: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).replace(/^data:[^,]*,/, ""));
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(f);
+  });
 }
 
 // ---------- header ----------
@@ -513,19 +534,54 @@ function Composer({ s }: { s: PanelState }) {
     clearTimeout(draftTimer.current);
     draftTimer.current = setTimeout(() => send({ type: "draft", text: v }), 250);
   };
+  const [files, setFiles] = useState<OutgoingAttachment[]>([]);
+  const [fileError, setFileError] = useState("");
+  const [dragging, setDragging] = useState(false);
+  const picker = useRef<HTMLInputElement>(null);
+  const addFiles = async (list: FileList | File[] | null) => {
+    const incoming = Array.from(list || []);
+    if (!incoming.length) return;
+    let next = [...files], err = "";
+    for (const f of incoming) {
+      if (next.length >= MAX_FILES) { err = `At most ${MAX_FILES} files per message.`; break; }
+      const c = classifyFile(f.name, f.type, f.size);
+      if ("error" in c) { err = c.error; continue; }
+      if (next.reduce((n, x) => n + x.size, 0) + f.size > MAX_TOTAL) { err = "The files are larger than 30 MB together."; continue; }
+      try { next = [...next, { name: f.name, type: c.type, size: f.size, data: await readFile(f) }]; } catch { err = `“${f.name}” could not be read.`; }
+    }
+    setFiles(next);
+    setFileError(err);
+    ta.current?.focus();
+  };
   const ready = s.connection === "connected" && !!p;
-  const canSend = !s.running && text.trim().length > 0 && ready;
+  const canSend = !s.running && (text.trim().length > 0 || files.length > 0) && ready;
   const submit = () => {
     if (!canSend) return;
     clearTimeout(draftTimer.current);
-    send({ type: "send", text, includeSelection: withSel });
+    send({ type: "send", text, includeSelection: withSel, attachments: files.length ? files : undefined });
     setText("");
+    setFiles([]);
+    setFileError("");
   };
   const loading = s.connection === "connecting" || (s.connection === "connected" && s.providers.length === 0);
   const placeholder = loading ? "Connecting…" : !ready ? "Sign in to Claude or ChatGPT in Settings" : p?.id === "chatgpt" ? "Ask ChatGPT about this page" : "How can I help with this page?";
   return (
     <div className="composer">
-      <div className="composer-box" onClick={(e) => { if (e.target === e.currentTarget) ta.current?.focus(); }}>
+      <div className={`composer-box ${dragging ? "drop" : ""}`} onClick={(e) => { if (e.target === e.currentTarget) ta.current?.focus(); }}
+        onDragOver={(e) => { if (e.dataTransfer?.types?.includes("Files")) { e.preventDefault(); setDragging(true); } }}
+        onDragLeave={(e) => { if (e.currentTarget === e.target) setDragging(false); }}
+        onDrop={(e) => { if (e.dataTransfer?.files?.length) { e.preventDefault(); setDragging(false); addFiles(e.dataTransfer.files); } }}>
+        {files.length > 0 && (
+          <div className="att-list">
+            {files.map((f, i) => (
+              <span className="att" key={i} title={f.name}>
+                {I.doc}<span className="att-name">{f.name}</span>
+                <button className="att-x" title="Remove" onClick={() => setFiles(files.filter((_, j) => j !== i))}>{I.xmark}</button>
+              </span>
+            ))}
+          </div>
+        )}
+        {fileError && <div className="att-error">{fileError}</div>}
         <div className="ctx-row">
           <button className={`ctx-chip toggle ${withSel ? "on" : ""}`} onClick={() => setWithSel(!withSel)} aria-pressed={withSel}
             title="Also send the text you have highlighted on the page (not the whole page — the agent reads the page itself when needed)">
@@ -538,6 +594,7 @@ function Composer({ s }: { s: PanelState }) {
           placeholder={placeholder}
           value={text}
           onChange={(e) => update(e.target.value)}
+          onPaste={(e) => { const fl = e.clipboardData?.files; if (fl && fl.length) { e.preventDefault(); addFiles(fl); } }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
@@ -548,6 +605,9 @@ function Composer({ s }: { s: PanelState }) {
           }}
         />
         <div className="composer-bar">
+          <button className="pill attach" title="Attach files (images, PDFs, text)" disabled={s.running || files.length >= MAX_FILES} onClick={() => picker.current?.click()}>{I.clip}</button>
+          <input ref={picker} type="file" multiple hidden accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/*,.md,.csv,.json,.tex,.py,.swift,.js,.ts"
+            onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} />
           <ApprovalPill s={s} />
           <div className="spacer" />
           <ModelPicker s={s} />

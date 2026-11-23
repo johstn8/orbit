@@ -59,7 +59,7 @@ struct ToolOutcome {
 protocol Provider: AnyObject {
     var id: String { get }
     func status(refresh: Bool, completion: @escaping (JSONObject) -> Void)
-    func startTurn(conversation: Conversation, userText: String, model: String?, effort: String?, sink: TurnSink)
+    func startTurn(conversation: Conversation, userText: String, attachments: [Attachment], model: String?, effort: String?, sink: TurnSink)
     func forget(conversationId: String)
 }
 
@@ -413,6 +413,9 @@ final class Hub {
             sendConversations()
         case "chat.send":
             chatSend(p, profile: profile ?? "default", reply: reply)
+        case "pdf.load", "pdf.text", "pdf.images", "pdf.save":
+            guard c.role == "extension" || c.role == "driver" else { return reply(.failure(AgentError("forbidden", "Not allowed."))) }
+            handlePDF(method, p, profile: profile, reply: reply)
         case "usage.get":
             reply(.success(UsageStore.shared.json()))
         case "chat.cancel":
@@ -626,6 +629,8 @@ final class Hub {
         let text = (p["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return reply(.failure(AgentError("bad_request", "Empty message."))) }
         guard text.count <= 100_000 else { return reply(.failure(AgentError("bad_request", "Message is too long."))) }
+        let attachments: [Attachment]
+        do { attachments = try Attachment.parse(p["attachments"]) } catch let e as AgentError { return reply(.failure(e)) } catch { return reply(.failure(AgentError("bad_file", "\(error)"))) }
         let providerId = p["provider"] as? String ?? "claude"
         guard let prov = provider(providerId) else { return reply(.failure(AgentError("bad_request", "Unknown provider."))) }
         let status = lastProviderStatus.first { $0["id"] as? String == providerId }
@@ -642,7 +647,7 @@ final class Hub {
         if let model { conv.model = model }
         if conv.profileId == nil { conv.profileId = profile }
         let userId = (p["userMessageId"] as? String) ?? "u\(Int(Date().timeIntervalSince1970 * 1000))"
-        conv.messages.append(UIMessage(id: userId, role: "user", blocks: [Block(type: "text", text: text)], createdAt: Date().timeIntervalSince1970 * 1000))
+        conv.messages.append(UIMessage(id: userId, role: "user", blocks: [Block(type: "text", text: text)] + attachments.map { Block(type: "attachment", name: $0.name, detail: $0.mime) }, createdAt: Date().timeIntervalSince1970 * 1000))
         conv.updatedAt = Date().timeIntervalSince1970 * 1000
         store.update(conv)
         reply(.success(["conversationId": conv.id, "title": conv.title]))
@@ -669,7 +674,7 @@ final class Hub {
             computerAccess: SettingsStore.shared.current.agent.computerAccess,
             folders: SettingsStore.shared.current.agent.folders)
         let fullText = Prompts.userMessage(text: text, context: p["context"] as? JSONObject, env: env)
-        prov.startTurn(conversation: conv, userText: fullText, model: model, effort: p["effort"] as? String, sink: TurnSink(hub: self, run: run))
+        prov.startTurn(conversation: conv, userText: fullText, attachments: attachments, model: model, effort: p["effort"] as? String, sink: TurnSink(hub: self, run: run))
     }
 
     // MARK: runs & events
@@ -724,6 +729,50 @@ final class Hub {
     // MARK: approvals
 
     /// Ask the user in the chat's own panel. Denies when no panel can ask.
+    /// PDFs for the agent's read_pdf / save_pdf tools (bytes come from the extension,
+    /// downloaded with the profile's own session). Saving always asks the user first,
+    /// here in the app, whatever the model or the approval mode says.
+    private func handlePDF(_ method: String, _ p: JSONObject, profile: String?, reply: @escaping Reply) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                switch method {
+                case "pdf.load":
+                    guard let url = p["url"] as? String, let b64 = p["data"] as? String, let data = Data(base64Encoded: b64) else { throw AgentError("bad_request", "Missing PDF.") }
+                    guard data.count <= 60 * 1024 * 1024 else { throw AgentError("too_large", "This PDF is larger than 60 MB.") }
+                    reply(.success(["pages": try PDFTools.shared.store(url: url, data: data)]))
+                case "pdf.text":
+                    let r = try PDFTools.shared.text(url: p["url"] as? String ?? "", pages: p["pages"] as? String,
+                                                     offset: (p["offset"] as? Int) ?? 0, maxChars: min(60_000, (p["max_chars"] as? Int) ?? 30_000))
+                    reply(.success(["text": r.text, "pageCount": r.pageCount]))
+                case "pdf.images":
+                    let imgs = try PDFTools.shared.images(url: p["url"] as? String ?? "", pages: p["pages"] as? String)
+                    reply(.success(["images": imgs.map { ["page": $0.page, "data": $0.base64] }]))
+                default: // pdf.save
+                    guard let conv = p["conversationId"] as? String, let profile, let raw = p["sources"] as? [JSONObject], !raw.isEmpty else { throw AgentError("bad_request", "Nothing to save.") }
+                    let sources = raw.map { (url: $0["url"] as? String ?? "", pages: $0["pages"] as? String) }
+                    let name = PDFTools.safeName(p["filename"] as? String ?? "Document.pdf")
+                    let folder = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? Paths.home.appendingPathComponent("Downloads")
+                    let what = sources.map { s in "\(URL(string: s.url)?.lastPathComponent ?? "PDF") (pages \(s.pages?.isEmpty == false ? s.pages! : "all"))" }.joined(separator: ", ")
+                    self.queue.async {
+                        guard self.runs[conv] != nil else { return reply(.failure(AgentError("not_running", "No task is running."))) }
+                        self.requestApproval(profileId: profile, conversationId: conv, tool: "save_pdf", summary: "Save “\(name)” to Downloads",
+                                             reason: "Combines \(what) into a new PDF in your Downloads folder.") { ok in
+                            guard ok else { return reply(.failure(AgentError("denied", "The user denied saving the PDF. Do not retry; ask how to proceed."))) }
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                do {
+                                    let (url, n) = try PDFTools.shared.compose(sources, to: folder, filename: name)
+                                    reply(.success(["path": PathPolicy.display(url.path), "pages": n]))
+                                } catch { reply(.failure((error as? AgentError) ?? AgentError("write_failed", "\(error)"))) }
+                            }
+                        }
+                    }
+                }
+            } catch {
+                reply(.failure((error as? AgentError) ?? AgentError("pdf_error", "\(error)")))
+            }
+        }
+    }
+
     func requestApproval(profileId: String, conversationId: String, tool: String, summary: String, reason: String, completion: @escaping (Bool) -> Void) {
         callInstance(profileId, "approval", ["conversationId": conversationId, "tool": tool, "summary": summary, "reason": reason], timeout: 5 * 60 + 5) { r in
             if case .success(let v) = r, let o = v as? JSONObject, o["allow"] as? Bool == true { completion(true) } else { completion(false) }
@@ -917,6 +966,8 @@ enum ToolSummary {
         case "switch_tab": return "Switching tab\(inProfile)"
         case "close_tab": return "Closing tab"
         case "screenshot": return "Taking screenshot"
+        case "read_pdf": return a["pages_as_images"] as? Bool == true ? "Viewing PDF pages" : "Reading PDF"
+        case "save_pdf": return "Saving “\(PDFTools.safeName(s("filename")))”"
         case "wait": return "Waiting"
         default: return NativeTools.describe(name, a) ?? name
         }

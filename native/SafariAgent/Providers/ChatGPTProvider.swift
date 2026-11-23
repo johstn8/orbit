@@ -258,11 +258,11 @@ final class ChatGPTProvider: Provider {
         running[conversationId] = nil
     }
 
-    func startTurn(conversation: Conversation, userText: String, model: String?, effort: String?, sink: TurnSink) {
+    func startTurn(conversation: Conversation, userText: String, attachments: [Attachment], model: String?, effort: String?, sink: TurnSink) {
         guard let hub else { return }
         let convId = conversation.id
         var items = hub.store.loadItems(convId)
-        items.append(["role": "user", "content": [["type": "input_text", "text": userText]]])
+        items.append(["role": "user", "content": Attachment.chatGPTParts(attachments) + [["type": "input_text", "text": userText]]])
         let modelId = model ?? conversation.model ?? models.first?["id"] as? String
         let task = Task { [weak self] in
             guard let self else { return }
@@ -344,7 +344,22 @@ final class ChatGPTProvider: Provider {
     /// Make the history safe to persist and to resend: drop screenshots from old
     /// tool outputs and cap the length.
     static func compact(_ items: [JSONObject]) -> [JSONObject] {
-        var out = items.map { item -> JSONObject in
+        // Attached files are resent with the last 3 user messages only; older ones become a note.
+        let userIdx = items.indices.filter { items[$0]["role"] as? String == "user" }
+        let keepFrom = userIdx.count > 3 ? userIdx[userIdx.count - 3] : 0
+        var out = items.enumerated().map { (n, item) -> JSONObject in
+            if n < keepFrom, item["role"] as? String == "user", let parts = item["content"] as? [JSONObject],
+               parts.contains(where: { ["input_image", "input_file"].contains($0["type"] as? String ?? "") }) {
+                var i = item
+                i["content"] = parts.map { p -> JSONObject in
+                    switch p["type"] as? String {
+                    case "input_image": return ["type": "input_text", "text": "[attached image omitted from history]"]
+                    case "input_file": return ["type": "input_text", "text": "[attached file “\(p["filename"] as? String ?? "file")” omitted from history]"]
+                    default: return p
+                    }
+                }
+                return i
+            }
             guard item["type"] as? String == "function_call_output", let arr = item["output"] as? [JSONObject] else { return item }
             var i = item
             i["output"] = arr.compactMap { $0["type"] as? String == "input_text" ? $0["text"] as? String : "[screenshot omitted from history]" }.joined(separator: "\n")

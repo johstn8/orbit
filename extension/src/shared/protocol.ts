@@ -45,6 +45,8 @@ export type Block =
       detail?: string;
     }
   | { type: "error"; text: string }
+  /** A file attached to a user message (name and type only; the data isn't kept here). */
+  | { type: "attachment"; name: string; detail?: string }
   | { type: "notice"; text: string };
 
 export interface UIMessage {
@@ -149,6 +151,14 @@ export const DEFAULT_SETTINGS: Settings = {
 
 export type ConnectionState = "connecting" | "connected" | "helper_unavailable" | "error";
 
+/** A file attached in the composer, base64 without the data: prefix. */
+export interface OutgoingAttachment {
+  name: string;
+  type: string;
+  size: number;
+  data: string;
+}
+
 export interface PanelState {
   connection: ConnectionState;
   connectionDetail?: string;
@@ -190,7 +200,7 @@ export interface TabPanelState {
 
 export type PanelToBackground =
   | { type: "init"; tabId?: number }
-  | { type: "send"; text: string; includeSelection: boolean }
+  | { type: "send"; text: string; includeSelection: boolean; attachments?: OutgoingAttachment[] }
   | { type: "cancel" }
   | { type: "new_conversation" }
   | { type: "load_conversation"; id: string }

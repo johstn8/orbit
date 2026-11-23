@@ -394,3 +394,20 @@ textarea::placeholder { color: var(--fg-3); }
 .usage-bar { height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .usage-bar-fill { height: 100%; border-radius: 3px; background: var(--accent); transition: width .4s var(--ease); }
 .usage-foot { margin-top: 10px; font-size: 10.5px; color: var(--fg-3); }
+
+/* ---------- attachments ---------- */
+.composer-box.drop { box-shadow: var(--shadow-composer), 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent); }
+.att-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 6px -2px; }
+.att-list.sent { justify-content: flex-end; margin: 0 0 6px; }
+.att {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-width: 0; padding: 4px 6px 4px 8px;
+  border-radius: 10px; background: var(--hover); color: var(--fg-2); font-size: 12px;
+}
+.att svg { flex: none; width: 15px; height: 15px; }
+.att-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+.att-x { border: 0; background: transparent; color: var(--fg-3); display: grid; place-items: center; padding: 0; width: 16px; height: 16px; border-radius: 8px; }
+.att-x:hover { background: var(--hover); color: var(--fg); }
+.att-x svg { width: 12px; height: 12px; }
+.att-error { font-size: 11.5px; color: var(--warn); margin: 0 0 4px; }
+.pill.attach { padding: 5px 7px; }
+.pill.attach:disabled { opacity: .35; }

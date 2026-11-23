@@ -147,6 +147,14 @@ The prompt-free real-Safari checks verify:
 - **Cause:** Orbit makes room for fixed layers (app shells, headers) when it scans the page and when the page changes its elements. While a tab is hidden, Safari runs no animation frames, so apps such as chatgpt.com finish their layout only after the tab is shown again, often without changing any attribute. Layers measured while hidden (often 0 wide) were never measured again and stayed under the sidebar.
 - **Fix:** when a tab becomes visible again (and on `pageshow`, and on window focus at most every 3 s), Orbit re-applies the page margin and rescans now, after 0.4 s and after 1.5 s. It also watches `<head>`, so a site that rebuilds it can't drop the margin style.
 
+## 1.1.16: file attachments, PDF tools
+
+- **Attach files in the sidebar** (paperclip, drag and drop, or paste): images (PNG, JPEG, GIF, WebP), PDFs and text files, up to 5 per message, 20 MB each (text 1 MB), 30 MB together. Checked in the panel and again in the app. They go only to the chat's provider as part of the user's message: Claude Code gets image/document content blocks in its stream-json input, ChatGPT gets `input_image`/`input_file` parts. ChatGPT resends attachments with the last 3 user messages; older ones become a note. Chats show the file names, not the data.
+- **`read_pdf` tool.** Safari's PDF viewer gives the agent no page text and can't be scrolled by it. The extension now downloads the PDF (the tab's or a linked one) with the profile's own session, and Orbit extracts the text per page with PDFKit or renders up to 6 pages as images (for slides that are pictures). PDF content is marked untrusted. Fetching a link follows the same approval rules as opening it.
+- **`save_pdf` tool.** Combines pages of loaded PDFs into a new file in Downloads. The app always asks the user first (independent of the approval mode); names are sanitized and existing files are never overwritten.
+- Verified live without prompts: `pdf.load` / `pdf.text` / `pdf.images` on a test PDF. Not verified live: a chat with attachments (would use quota) and `save_pdf` inside a chat.
+- Tests: Swift 135/135 (11 new), TypeScript 57/57 (2 new), all executed.
+
 ## 1.1.15: ChatGPT usage ring
 
 - **ChatGPT showed no ring.** Checked live: ChatGPT's replies to Orbit carry no limits (neither headers nor stream events), and ChatGPT's usage service (`chatgpt.com/backend-api/wham/usage`) rejects Orbit's sign-in (401).

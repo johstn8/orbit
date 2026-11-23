@@ -31,6 +31,8 @@ export interface ExecutorHost {
   agentTab(conversationId: string): { tabId?: number; windowId?: number };
   setAgentTab(conversationId: string, tabId: number, windowId?: number): void;
   setIndicator(tabId: number | undefined, active: boolean): void;
+  /** Request to the Orbit app (PDF text, images and saving use PDFKit there). */
+  request(method: string, params: any, timeoutMs?: number): Promise<any>;
 }
 
 export class ToolFailure extends Error {}
@@ -124,6 +126,41 @@ export class ToolExecutor {
     if (!tab) throw new ToolFailure("No browser tab is available.");
     this.host.setAgentTab(conversationId, tab.id, tab.windowId);
     return tab;
+  }
+
+  /** The PDF to read: a link (like opening it, so the same approval rules apply) or a tab's URL. */
+  private async pdfUrl(conversationId: string, rawUrl: any, tabId: number | undefined, mode: ApprovalMode): Promise<string> {
+    if (rawUrl) {
+      const url = validateNavigationUrl(String(rawUrl));
+      await this.approve(conversationId, "navigate", `Download the PDF ${url}`, this.guard(genericActionNeedsApproval(mode, "navigate"), true), hostOf(url));
+      return url;
+    }
+    const tab = await this.resolveTab(conversationId, tabId);
+    const url: string = tab.url || "";
+    if (!/^https?:/i.test(url)) {
+      if (/^file:/i.test(url)) throw new ToolFailure("This PDF is a file on the Mac; read it with the file tools (if the user allowed computer access) instead.");
+      throw new ToolFailure(tab.url ? "This tab doesn't show a web PDF." : NO_ACCESS);
+    }
+    return url;
+  }
+
+  /** Download a PDF with this profile's session and hand it to the Orbit app. Returns the page count. */
+  private async loadPdf(url: string): Promise<number> {
+    let res: Response;
+    try {
+      res = await fetch(url, { credentials: "include", redirect: "follow" });
+    } catch (e: any) {
+      throw new ToolFailure(`The PDF could not be downloaded (${e?.message || e}).`);
+    }
+    if (!res.ok) throw new ToolFailure(`The PDF could not be downloaded (HTTP ${res.status}).`);
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (buf.length > 60 * 1024 * 1024) throw new ToolFailure("This PDF is larger than 60 MB.");
+    const head = new TextDecoder("latin1").decode(buf.subarray(0, 1024));
+    if (!head.includes("%PDF")) throw new ToolFailure("This link isn't a PDF (the site may have shown a login or download page instead).");
+    let bin = "";
+    for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000) as any);
+    const r = await this.host.request("pdf.load", { url, data: btoa(bin) }, 120000);
+    return Number(r?.pages) || 0;
   }
 
   private assertScriptable(tab: any) {
@@ -396,6 +433,38 @@ export class ToolExecutor {
           result: { content: [{ type: "image", mediaType: m[1], data: m[2] }, { type: "text", text: `Screenshot of ${tab.url}` }] },
           summary: `Took a screenshot of ${hostOf(tab.url)}`,
         };
+      }
+      case "read_pdf": {
+        const url = await this.pdfUrl(conversationId, args.url, args.tabId, mode);
+        const pages = await this.loadPdf(url);
+        const range = args.pages ? String(args.pages) : undefined;
+        if (args.pages_as_images) {
+          const r = await this.host.request("pdf.images", { url, pages: range }, 60000);
+          const imgs: any[] = r?.images || [];
+          if (!imgs.length) throw new ToolFailure("No page images could be made.");
+          return {
+            result: { content: [...imgs.flatMap((i) => [{ type: "text" as const, text: `Page ${i.page} of ${pages}:` }, { type: "image" as const, mediaType: "image/jpeg", data: i.data }])] },
+            summary: `Viewed ${imgs.length} PDF page${imgs.length === 1 ? "" : "s"} from ${hostOf(url) || "PDF"}`,
+          };
+        }
+        const r = await this.host.request("pdf.text", { url, pages: range, offset: Number(args.offset) || 0, max_chars: Number(args.max_chars) || 30000 }, 60000);
+        return {
+          result: text(`<pdf_content url="${url.replace(/"/g, "%22")}" pages="${pages}" untrusted="true">\n${r?.text || ""}\n</pdf_content>`),
+          summary: `Read PDF (${pages} pages) on ${hostOf(url) || "PDF"}`,
+        };
+      }
+      case "save_pdf": {
+        const raw: any[] = Array.isArray(args.sources) ? args.sources.slice(0, 20) : [];
+        if (!raw.length) throw new ToolFailure("Give at least one source PDF.");
+        const sources: { url: string; pages?: string }[] = [];
+        for (const s of raw) {
+          const url = await this.pdfUrl(conversationId, s?.url, typeof s?.tabId === "number" ? s.tabId : undefined, mode);
+          await this.loadPdf(url);
+          sources.push({ url, pages: s?.pages ? String(s.pages) : undefined });
+        }
+        // The Orbit app always asks the user before it saves (independent of the approval mode).
+        const r = await this.host.request("pdf.save", { conversationId, sources, filename: String(args.filename || "Document.pdf") }, 6 * 60 * 1000);
+        return { result: text(`Saved ${r?.pages} pages to ${r?.path}.`), summary: `Saved ${r?.path}` };
       }
       case "wait": {
         const s = Math.max(0, Math.min(10, Number(args.seconds) || 1));

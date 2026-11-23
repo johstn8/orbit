@@ -1,3 +1,4 @@
+import PDFKit
 // Unit tests for the native helper. Built and run by scripts/test-native.sh
 // (main.swift; compiled together with the app's Core and Providers sources).
 import Foundation
@@ -372,6 +373,33 @@ do {
     check(UsageStore.fromHeaders(["content-type": "text/event-stream"]).isEmpty, "no limit headers, no windows")
     let cx = CodexUsage.windows(["primary": ["usedPercent": 6, "windowDurationMins": 300, "resetsAt": 1795465218], "secondary": ["usedPercent": 12, "windowDurationMins": 10080, "resetsAt": 1795603524]])
     check(cx.count == 2 && cx[0].id == "five_hour" && cx[0].used == 6 && cx[1].id == "weekly" && cx[1].used == 12 && cx[1].resetsAt == 1795603524, "ChatGPT: limits from the Codex app server")
+}
+
+section("Attachments and PDF tools")
+do {
+    let png = Data([0x89, 0x50, 0x4E, 0x47]).base64EncodedString()
+    let a = try? Attachment.parse([["name": "a.png", "type": "image/png", "data": png], ["name": "n.md", "type": "", "data": Data("# Hi".utf8).base64EncodedString()]])
+    check(a?.count == 2 && a?[0].kind == .image && a?[1].kind == .text, "images and text files are accepted")
+    check((try? Attachment.parse([["name": "x.zip", "type": "application/zip", "data": Data([0, 1, 2, 0xFF, 0xFE]).base64EncodedString()]])) == nil, "binary non-PDF files are refused")
+    check((try? Attachment.parse(Array(repeating: ["name": "a.png", "type": "image/png", "data": png], count: 6))) == nil, "at most 5 files")
+    let cb = Attachment.claudeBlocks(a ?? [])
+    check(cb.first?["type"] as? String == "image" && (cb.last?["text"] as? String)?.contains("<attached_file name=\"n.md\">") == true, "Claude content blocks")
+    check((try? PDFTools.pages("1-3,5", count: 10)) == [0, 1, 2, 4], "page ranges")
+    check((try? PDFTools.pages(nil, count: 3)) == [0, 1, 2], "all pages by default")
+    check((try? PDFTools.pages("12", count: 10)) == nil, "pages outside the document are refused")
+    do {
+        let src = PDFDocument()
+        for _ in 0..<4 { src.insert(PDFPage(), at: src.pageCount) }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("orbit-pdf-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        _ = try PDFTools.shared.store(url: "u1", data: src.dataRepresentation()!)
+        let (first, n) = try PDFTools.shared.compose([("u1", "2-3"), ("u1", "1")], to: dir, filename: "Out")
+        let (second, _) = try PDFTools.shared.compose([("u1", nil)], to: dir, filename: "Out.pdf")
+        check(n == 3 && PDFDocument(url: first)?.pageCount == 3 && first.lastPathComponent == "Out.pdf", "save_pdf combines the chosen pages")
+        check(second.lastPathComponent == "Out 2.pdf", "an existing file is never overwritten")
+        try? FileManager.default.removeItem(at: dir)
+    } catch { check(false, "compose: \(error)") }
+    check(PDFTools.safeName("../../etc/x") == "x.pdf" && PDFTools.safeName(".hidden.pdf") == "_.hidden.pdf", "file names stay in the folder and visible")
 }
 
 print("\n\(passes) passed, \(failures) failed")

@@ -167,6 +167,7 @@ const executor = new ToolExecutor({
   lastFocusedWindow: () => lastFocusedWindowId,
   panelGeometry: async (tabId) => tabRpc(tabId, { kind: "panel_geometry" }, false).catch(() => null),
   beforeNavigation: () => routing.pauseBriefly(2500),
+  request: (m, p, t) => helper.request(m, p, t),
   setAgentTab: (id, tabId, windowId) => {
     const prev = agentTabs.get(id)?.tabId;
     agentTabs.set(id, { tabId, windowId });
@@ -814,7 +815,8 @@ async function handlePanelMessage(msg: PanelToBackground, port: any) {
       return;
     case "send": {
       if (state.running) return;
-      const text = msg.text.trim();
+      const files = Array.isArray(msg.attachments) ? msg.attachments.slice(0, 5) : [];
+      const text = msg.text.trim() || (files.length ? "Please look at the attached file" + (files.length > 1 ? "s." : ".") : "");
       if (!text) return;
       if (portTab !== undefined) tabPanel.set(portTab, { draft: "", restoreFocus: false });
       const choice = pickProvider();
@@ -826,7 +828,10 @@ async function handlePanelMessage(msg: PanelToBackground, port: any) {
       const ctx = await currentContext(msg.includeSelection, portTab);
       let conv = state.conversation;
       if (conv && (conv.id === "local" || conv.provider !== choice.provider)) conv = null;
-      const userMsg: UIMessage = { id: `u${Date.now()}`, role: "user", blocks: [{ type: "text", text }], createdAt: Date.now() };
+      const userMsg: UIMessage = {
+        id: `u${Date.now()}`, role: "user", createdAt: Date.now(),
+        blocks: [{ type: "text", text }, ...files.map((f) => ({ type: "attachment" as const, name: String(f.name), detail: String(f.type) }))],
+      };
       if (!conv) {
         conv = { id: "pending", title: text.slice(0, 60), provider: choice.provider as any, model: choice.model, updatedAt: Date.now(), messages: [] };
         state.conversation = conv;
@@ -846,7 +851,8 @@ async function handlePanelMessage(msg: PanelToBackground, port: any) {
           userMessageId: userMsg.id,
           tabScope: state.settings.tabScope,
           approvalMode: state.settings.approvalMode,
-        }, 60000);
+          attachments: files.map((f) => ({ name: f.name, type: f.type, data: f.data })),
+        }, 120000);
         conv.id = res.conversationId;
         conv.title = res.title || conv.title;
         runningConversationId = res.conversationId;

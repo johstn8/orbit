@@ -26,7 +26,7 @@
 | 🔗 **Links from other apps** | Make Orbit your default browser, and links from Mail, Messages or Slack open in the right profile, or ask you with the picker. |
 | 🧭 **Website routing** | Rules such as `moodle.uni-example.de → University` open a site in the right profile. The tab you came from stays as it was. |
 | 🔑 **Shared logins** *(opt-in)* | Stay signed in to chosen sites, such as ChatGPT or Google, in several profiles. Nothing is shared unless you turn it on per site. |
-| ✨ **AI agent sidebar** | Press **⌥⌘K** in Safari to open a sidebar where **Claude** or **ChatGPT** reads and operates your real tabs. With your permission, it can also work with files. A ring at the top shows how much of your 5-hour and weekly plan limits you have used. |
+| ✨ **AI agent sidebar** | Press **⌥⌘K** in Safari to open a sidebar where **Claude** or **ChatGPT** reads and operates your real tabs. With your permission, it can also work with files. You can attach images, PDFs and text files, and the agent reads PDFs open in Safari. A ring at the top shows how much of your 5-hour and weekly plan limits you have used. |
 | 🛡️ **Permissions you control** | Browser and computer access are set separately and enforced by Orbit, not by the AI. Sensitive actions ask first. |
 
 The agent uses subscriptions you already have, with no API keys:

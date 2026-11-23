@@ -192,13 +192,14 @@ final class ClaudeSession {
         idleTimer = t
     }
 
-    func send(text: String, sink: TurnSink) {
+    func send(text: String, attachments: [Attachment] = [], sink: TurnSink) {
         queue.async {
             self.sink = sink
             self.interruptRequested = false
             self.sawText = false
             self.lastActivity = Date()
-            let msg: JSONObject = ["type": "user", "message": ["role": "user", "content": [["type": "text", "text": text]]]]
+            let content: [JSONObject] = Attachment.claudeBlocks(attachments) + [["type": "text", "text": text]]
+            let msg: JSONObject = ["type": "user", "message": ["role": "user", "content": content]]
             self.write(msg)
         }
     }
@@ -349,7 +350,7 @@ final class ClaudeProvider: Provider {
         }
     }
 
-    func startTurn(conversation: Conversation, userText: String, model: String?, effort: String?, sink: TurnSink) {
+    func startTurn(conversation: Conversation, userText: String, attachments: [Attachment], model: String?, effort: String?, sink: TurnSink) {
         guard let hub else { return }
         guard let exe = ClaudeCLI.locate() else {
             return sink.finish(error: AgentError("not_installed", "Claude Code is not installed."))
@@ -387,7 +388,7 @@ final class ClaudeProvider: Provider {
             session = s
         }
         sink.run.cancelHandler = { [weak session] in session?.interrupt() }
-        session!.send(text: userText, sink: sink)
+        session!.send(text: userText, attachments: attachments, sink: sink)
     }
 
     func forget(conversationId: String) {
