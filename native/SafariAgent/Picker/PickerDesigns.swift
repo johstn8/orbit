@@ -386,17 +386,18 @@ private struct PearlView: View {
 
     var body: some View {
         VStack(spacing: 7) {
-            ZStack {
-                ProfileGlyph(item: item, size: d)
-                // Specular highlight that makes the glass read as a sphere.
-                Ellipse().fill(LinearGradient(colors: [.white.opacity(0.32), .white.opacity(0)], startPoint: .top, endPoint: .bottom))
-                    .frame(width: d * 0.5, height: d * 0.24)
-                    .offset(x: -d * 0.08, y: -d * 0.2)
-                    .blendMode(.plusLighter)
-                    .allowsHitTesting(false)
-            }
-            .clipShape(Circle())
-            .liquidGlass(Circle(), tint: item.color.opacity(lit ? 0.4 : 0.2))
+            ProfileGlyph(item: item, size: d)
+                .clipShape(Circle())
+                .liquidGlass(Circle(), tint: item.color.opacity(lit ? 0.4 : 0.2))
+                // Specular highlight that makes the glass read as a sphere. It sits on top of
+                // the glass with a normal blend: inside the glass, a light-adding blend turned
+                // grey whenever the glass re-rendered its backdrop (e.g. on hover).
+                .overlay {
+                    Ellipse().fill(LinearGradient(colors: [.white.opacity(0.3), .white.opacity(0)], startPoint: .top, endPoint: .bottom))
+                        .frame(width: d * 0.5, height: d * 0.24)
+                        .offset(x: -d * 0.08, y: -d * 0.2)
+                        .allowsHitTesting(false)
+                }
             .shadow(color: item.color.opacity(lit ? 0.45 : 0.2), radius: lit ? 16 : 9, y: 6)
             .scaleEffect(lit ? 1.12 : 1)
             if showNames {

@@ -502,6 +502,10 @@ final class Hub {
         case "debug.safari_db":
             guard c.role == "driver" else { return reply(.failure(AgentError("forbidden", "Not allowed."))) }
             reply(.success(SafariProfileStore.describeSchema()))
+        case "debug.windows":
+            // Local test driver only: Safari's windows as Orbit sees them (no titles or URLs).
+            guard c.role == "driver" else { return reply(.failure(AgentError("forbidden", "Not allowed."))) }
+            DispatchQueue.main.async { reply(.success(SafariAX.describeWindows())) }
         case "debug.focus_profile", "debug.safari_profiles":
             // Local test driver only.
             guard c.role == "driver" else { return reply(.failure(AgentError("forbidden", "Not allowed."))) }

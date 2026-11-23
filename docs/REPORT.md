@@ -147,6 +147,14 @@ The prompt-free real-Safari checks verify:
 - **Cause:** Orbit makes room for fixed layers (app shells, headers) when it scans the page and when the page changes its elements. While a tab is hidden, Safari runs no animation frames, so apps such as chatgpt.com finish their layout only after the tab is shown again, often without changing any attribute. Layers measured while hidden (often 0 wide) were never measured again and stayed under the sidebar.
 - **Fix:** when a tab becomes visible again (and on `pageshow`, and on window focus at most every 3 s), Orbit re-applies the page margin and rescans now, after 0.4 s and after 1.5 s. It also watches `<head>`, so a site that rebuilds it can't drop the margin style.
 
+## 1.1.12: picker opened new windows with Stage Manager, pearl highlight
+
+- **Picker opened a new window although one was open.** Orbit decides whether a profile's window is on the current Space by looking at the windows macOS shows on screen. It matched them by frame. With Stage Manager, macOS reports the windows in the side strip at their thumbnail size, so they never matched and Orbit opened a new window. Orbit now matches windows by their window id (and compares the extension's window bounds with the real window frames). Seen live: the Quant window was on screen by id but not by frame.
+- **Pearl highlight turned grey on hover.** The highlight used a light-adding blend inside the glass, which turned grey when the glass re-rendered. It now sits on top of the glass with a normal blend.
+- **Shared history.** Checked live: Safari still gives extensions no history API (`browser.history` is missing), so Orbit can't add to Safari's own per-profile history or its address-bar suggestions.
+- New local test-driver call `debug.windows` (Safari's windows as Orbit sees them; no titles or URLs).
+- Tests: Swift 119/119, TypeScript 50/50 (executed).
+
 ## 1.1.11: address-bar suggestions routed, missed login changes
 
 - **Typing a routed site's name routed it before Return.** Safari loads the address bar's

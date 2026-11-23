@@ -314,6 +314,11 @@ final class ProfileRegistry: ObservableObject {
 }
 
 /// Reads Safari's UI through Accessibility.
+/// Private but stable Accessibility call (used by many window managers): the window server's
+/// id of an Accessibility window.
+@_silgen_name("_AXUIElementGetWindow")
+private func _AXUIElementGetWindow(_ element: AXUIElement, _ id: UnsafeMutablePointer<CGWindowID>) -> AXError
+
 enum SafariAX {
     struct MenuItem { let name: String; let isDefault: Bool; let element: AXUIElement }
     struct WindowInfo { let element: AXUIElement; let name: String; let icon: String? }
@@ -452,6 +457,58 @@ enum SafariAX {
     static func move(_ w: AXUIElement, to origin: CGPoint) {
         var pt = origin
         if let v = AXValueCreate(.cgPoint, &pt) { AXUIElementSetAttributeValue(w, kAXPositionAttribute as CFString, v) }
+    }
+
+    /// The window server's id of an Accessibility window.
+    static func windowID(_ w: AXUIElement) -> CGWindowID? {
+        var id: CGWindowID = 0
+        return _AXUIElementGetWindow(w, &id) == .success && id != 0 ? id : nil
+    }
+
+    /// Ids of Safari's windows that are on screen on the current Space(s).
+    static func onScreenIDs() -> Set<CGWindowID> {
+        guard let pid = safariApp()?.processIdentifier,
+              let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
+        return Set(list.compactMap { info in
+            guard info[kCGWindowOwnerPID as String] as? Int32 == pid, info[kCGWindowLayer as String] as? Int == 0 else { return nil }
+            return (info[kCGWindowNumber as String] as? NSNumber).map { CGWindowID($0.uint32Value) }
+        })
+    }
+
+    /// Whether the window is on the current Space: by its window id, since with Stage Manager
+    /// the window server reports windows in the side strip at their thumbnail size (falls
+    /// back to comparing frames when the id can't be read).
+    static func isOnScreen(_ w: AXUIElement, ids: Set<CGWindowID>? = nil) -> Bool {
+        if let id = windowID(w) { return (ids ?? onScreenIDs()).contains(id) }
+        guard let f = frame(of: w) else { return false }
+        return onScreenFrames().contains { SafariController.sameFrame($0, f) }
+    }
+
+    /// Accessibility frames (real size, top-left points) of Safari's windows on the current Space(s).
+    static func onScreenWindowFrames() -> [CGRect] {
+        guard let app = safariElement() else { return [] }
+        let ids = onScreenIDs()
+        let wins = (attr(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+        return wins.filter { isOnScreen($0, ids: ids) }.compactMap { frame(of: $0) }
+    }
+
+    /// For diagnostics: Safari's windows as Orbit sees them (profile, frame, state; no titles).
+    static func describeWindows() -> JSONObject {
+        guard let app = safariElement() else { return ["safari": false] }
+        let wins = (attr(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+        let ids = onScreenIDs(), frames = onScreenFrames()
+        return [
+            "trusted": AXIsProcessTrusted(),
+            "windows": wins.map { w -> JSONObject in
+                let f = frame(of: w)
+                return ["subrole": (attr(w, kAXSubroleAttribute) as? String) ?? "", "profile": profile(of: w)?.name as Any,
+                        "frame": f.map { [Int($0.minX), Int($0.minY), Int($0.width), Int($0.height)] } as Any,
+                        "minimized": isMinimized(w), "id": windowID(w).map { Int($0) } as Any,
+                        "onScreenById": windowID(w).map { ids.contains($0) } as Any,
+                        "onScreenByFrame": f.map { f in frames.contains { SafariController.sameFrame($0, f) } } as Any]
+            },
+            "onScreen": frames.map { [Int($0.minX), Int($0.minY), Int($0.width), Int($0.height)] },
+        ]
     }
 
     /// Number of Safari's normal windows (any profile).
@@ -829,8 +886,7 @@ enum SafariController {
         let viaAX = await MainActor.run { () -> Bool in
             guard AXIsProcessTrusted(), let name else { return false }
             let mine = SafariAX.windowProfiles().filter { $0.name == name }
-            let here = SafariAX.onScreenFrames()
-            let visible = mine.first { w in SafariAX.frame(of: w.element).map { f in here.contains { sameFrame($0, f) } } ?? false }
+            let visible = mine.first { SafariAX.isOnScreen($0.element) }
             // A minimized window comes back on this Space: use it instead of opening a new one.
             let minimized = mine.first { SafariAX.isMinimized($0.element) }
             guard let w = visible ?? (screen == nil ? mine.first : nil) ?? minimized else { return false }
@@ -846,7 +902,9 @@ enum SafariController {
         if Hub.shared.queue.sync(execute: { Hub.shared.instances[profileId] != nil }),
            case .success(let v) = await Hub.shared.callInstance(profileId, "list_windows", [:], timeout: 2),
            let wins = (v as? JSONObject)?["windows"] as? [JSONObject], !wins.isEmpty {
-            let here = await MainActor.run { SafariAX.onScreenFrames() }
+            // Compared with the real frames of the on-screen windows: with Stage Manager the
+            // window server reports windows in the side strip at their thumbnail size.
+            let here = await MainActor.run { SafariAX.onScreenWindowFrames() }
             let rect = { (w: JSONObject) -> CGRect? in
                 guard let l = w["left"] as? Double, let t = w["top"] as? Double, let wd = w["width"] as? Double, let h = w["height"] as? Double else { return nil }
                 return CGRect(x: l, y: t, width: wd, height: h)
